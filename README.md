@@ -1,6 +1,6 @@
 # KubePyrometer -- Kubernetes Control-Plane Load-Testing Harness
 
-A harness that uses [kube-burner](https://github.com/kube-burner/kube-burner) to measure end-to-end control-plane request latency under configurable CPU, memory, disk, and network stress. Latency is measured from inside the cluster by a probe pod that issues API requests (`/readyz`, list nodes, list configmaps) and records round-trip time. The measured path includes the API server, authn/authz, admission controllers, etcd, and the in-cluster network between the probe pod and the API server.
+A harness that uses [kube-burner](https://github.com/kube-burner/kube-burner) to measure end-to-end control-plane request latency under configurable CPU, memory, disk, network, and API stress. Latency is measured from inside the cluster by a probe pod that issues API requests (`/readyz`, list nodes, list configmaps) and records round-trip time. The measured path includes the API server, authn/authz, admission controllers, etcd, and the in-cluster network between the probe pod and the API server.
 
 No Go toolchain required -- the harness automatically downloads a pinned kube-burner release binary.
 
@@ -65,7 +65,7 @@ BASELINE probe  ->  RAMP stress (N steps)  ->  TEARDOWN  ->  RECOVERY probe
 ```
 
 - **Baseline probe** -- Deploys a Job that repeatedly queries the API server (`/readyz`, list nodes, list configmaps in `kube-system`) and records latency. This establishes the "quiet" baseline.
-- **Ramp steps** -- For each step, deploys stress workloads into isolated namespaces (`kb-stress-1`, `kb-stress-2`, ...) to put pressure on the cluster. Which stress types are active (CPU, memory, disk, network) is determined by the contention mode selection at the start of the run.
+- **Ramp steps** -- For each step, deploys stress workloads into isolated namespaces (`kb-stress-1`, `kb-stress-2`, ...) to put pressure on the cluster. Which stress types are active (CPU, memory, disk, network, API) is determined by the contention mode selection at the start of the run.
 - **Teardown** -- Deletes all stress namespaces.
 - **Recovery probe** -- Identical to baseline, measures how quickly control-plane latency returns to baseline levels.
 
@@ -81,7 +81,7 @@ The harness supports five contention modes, each independently enabled or disabl
 | **mem** | Pods that fill `/dev/shm` with configurable MB | on | on |
 | **disk** | Pods that continuously write/delete files on an `emptyDir` volume | on | off |
 | **network** | Pod-to-pod HTTP traffic via an in-cluster echo server | on | off |
-| **api** | Floods the Kubernetes API server with ConfigMap CRUD operations at configurable QPS | on | off |
+| **api** | Floods the Kubernetes API server with ConfigMap + Secret creation at configurable QPS | on | off |
 
 The cpu, mem, disk, and network stress modes use `busybox:1.36.1` and run as unprivileged pods with no `NET_ADMIN` capabilities or PVCs. Network stress deploys a lightweight echo server (busybox httpd) and client pods that download a 64 KB payload in a loop, saturating pod network I/O without requiring any RBAC or API server access. The api stress mode uses kube-burner's native object creation to hammer the API server through the full request path (authn, authz, admission, etcd). The probe pods use `bitnami/kubectl:1.35.2`.
 
@@ -115,19 +115,75 @@ Edit mem settings for this run? [Y/n]
 Enable disk contention? [Y/n]
 Edit disk settings for this run? [Y/n] n
 Enable network contention? [Y/n] n
+Enable API stress? [Y/n]
+Edit API stress settings for this run? [Y/n] n
+Enable cluster monitor (kubectl top)? [Y/n]
+  Monitor interval (seconds) [10]: 5
 
 >>> Contention modes:
     cpu     = on   (replicas=1, millicores=50)
     mem     = on   (replicas=2, mb=64)
     disk    = on   (replicas=1, mb=64)
     network = off  (replicas=1, interval=0.5s)
+    api     = on   (qps=20, burst=40, iterations=50, replicas=5)
+    monitor = on   (interval=5s)
 ```
 
 All enable prompts default to **YES** (press Enter to accept). Settings show their current default in brackets; press Enter to keep the default or type a new value.
 
 ### Registry redirect (`-i` or `-r`)
 
-When you run `v0/run.sh -i` (or `-r`), the harness prompts for image registry redirects (useful for air-gapped clusters or private registries). If any images are redirected, it also asks for an optional `imagePullSecrets` name -- the Secret is injected into all pod specs so kubelet can authenticate to the private registry. You are responsible for creating the Secret in the target namespaces beforehand (e.g., via `kubectl create secret docker-registry`).
+When you run `v0/run.sh -i` (or `-r`), the harness prompts for image registry redirects (useful for air-gapped clusters or private registries). If any images are redirected, it also asks for an optional `imagePullSecrets` name -- the Secret is injected into all pod specs so kubelet can authenticate to the private registry. You are responsible for creating the Secret beforehand (see workflow below).
+
+For non-interactive registry redirect, use an **image map file** and set `IMAGE_MAP_FILE` and `IMAGE_PULL_SECRET` via `config.yaml` or environment variables.
+
+#### Image map file format
+
+The image map file is a plain-text list of `original = replacement` mappings, one per line. Lines starting with `#` are comments. Whitespace around `=` is trimmed.
+
+Example `my-images.txt` for a private ECR registry:
+
+```
+# Redirect harness images to private ECR
+busybox:1.36.1 = 123456789.dkr.ecr.us-east-1.amazonaws.com/busybox:1.36.1
+bitnami/kubectl:1.35.2 = 123456789.dkr.ecr.us-east-1.amazonaws.com/bitnami/kubectl:1.35.2
+```
+
+The harness detects all `image:` references in `templates/*.yaml` and `manifests/*.yaml`, then does a global find-and-replace in the staged copies. Source files are never modified.
+
+#### End-to-end workflow (private registry)
+
+```bash
+# 1. Push images to your private registry
+docker pull busybox:1.36.1
+docker tag busybox:1.36.1 123456789.dkr.ecr.us-east-1.amazonaws.com/busybox:1.36.1
+docker push 123456789.dkr.ecr.us-east-1.amazonaws.com/busybox:1.36.1
+
+docker pull bitnami/kubectl:1.35.2
+docker tag bitnami/kubectl:1.35.2 123456789.dkr.ecr.us-east-1.amazonaws.com/bitnami/kubectl:1.35.2
+docker push 123456789.dkr.ecr.us-east-1.amazonaws.com/bitnami/kubectl:1.35.2
+
+# 2. Create an image pull secret in the cluster
+#    (The harness injects imagePullSecrets into all pod specs automatically.)
+kubectl create secret docker-registry my-registry-creds \
+  --docker-server=123456789.dkr.ecr.us-east-1.amazonaws.com \
+  --docker-username=AWS \
+  --docker-password="$(aws ecr get-login-password)" \
+  -n default
+
+# 3. Run with the map file + pull secret
+IMAGE_MAP_FILE=my-images.txt IMAGE_PULL_SECRET=my-registry-creds SKIP_IMAGE_LOAD=1 v0/run.sh
+```
+
+Or configure it in `config.yaml` for repeatable runs:
+
+```yaml
+image_map_file: /path/to/my-images.txt
+image_pull_secret: my-registry-creds
+skip_image_load: 1
+```
+
+> **Note:** Set `skip_image_load: 1` when using registry redirect — otherwise the harness tries to load the bundled image tar first, which is unnecessary when pulling from a registry.
 
 ### Non-interactive overrides
 
@@ -138,7 +194,7 @@ In non-interactive mode (default), use environment variables to control behavior
 MODE_DISK=on MODE_NETWORK=on v0/run.sh
 
 # Redirect images via a map file and supply a pull secret
-IMAGE_MAP_FILE=my-images.txt IMAGE_PULL_SECRET=my-registry-creds v0/run.sh
+IMAGE_MAP_FILE=my-images.txt IMAGE_PULL_SECRET=my-registry-creds SKIP_IMAGE_LOAD=1 v0/run.sh
 ```
 
 ### Mode-specific settings
@@ -208,7 +264,7 @@ For Kind and k3d, `run.sh` automatically loads the bundled tar into the cluster 
 The bundled tar cannot be loaded directly onto remote cluster nodes. For managed clusters, you must ensure the images are reachable by one of these methods:
 
 1. **Public registry access** -- If the cluster nodes can pull from Docker Hub, the images will be pulled normally on first use (the `IfNotPresent` policy means subsequent runs reuse them).
-2. **Registry redirect** -- Use `-r` (interactive) or `IMAGE_MAP_FILE` (non-interactive) to rewrite image references to a private registry or mirror. If the registry requires authentication, set `IMAGE_PULL_SECRET` to the name of a pre-existing `docker-registry` Secret.
+2. **Registry redirect** -- Use `-r` (interactive) or `IMAGE_MAP_FILE` (non-interactive) to rewrite image references to a private registry or mirror. See [Image map file format](#image-map-file-format) for the file syntax and a full end-to-end workflow. If the registry requires authentication, set `IMAGE_PULL_SECRET` to the name of a pre-existing `docker-registry` Secret.
 3. **Node pre-loading** -- If you have SSH access to nodes, you can manually load the tar into the container runtime (e.g., `ctr -n k8s.io images import harness-images.tar` for containerd).
 
 Set `SKIP_IMAGE_LOAD=1` to skip the automatic load attempt entirely (useful when images are already present on nodes or available from a registry).
@@ -243,7 +299,7 @@ Prerequisites:
 - **kind** -- only needed for local dry runs (see below)
 - No Go toolchain required
 
-The running user's kubeconfig identity must be able to create/apply: Namespaces, ServiceAccounts, ClusterRoles, ClusterRoleBindings, Roles (in `kube-system`), RoleBindings (in `kube-system`), Jobs (in `kb-probe`), and Deployments (in `kb-stress-*` namespaces).
+The running user's kubeconfig identity must be able to create/apply: Namespaces, ServiceAccounts, ClusterRoles, ClusterRoleBindings, Roles (in `kube-system`), RoleBindings (in `kube-system`), Jobs (in `kb-probe`), Deployments (in `kb-stress-*` namespaces), Services (network stress echo server), ConfigMaps, and Secrets (API stress mode).
 
 ## Run against a real cluster
 
@@ -378,9 +434,7 @@ The smoke test uses intentionally small parameter values (1 ramp step, 10s probe
 
 ### `config.yaml`
 
-Flat YAML file of default parameters. Each key is uppercased and exported as an env var (e.g., `ramp_steps: 2` becomes `RAMP_STEPS=2`). Environment variables take precedence over the config file.
-
-The config file contains every tunable variable. Each key is uppercased and exported as an env var (e.g., `ramp_steps: 2` becomes `RAMP_STEPS=2`). Environment variables take precedence over the config file.
+Contains every tunable variable. Each key is uppercased and exported as an env var (e.g., `ramp_steps: 2` becomes `RAMP_STEPS=2`). Environment variables take precedence over the config file, so any key below can also be overridden at the command line (e.g., `RAMP_STEPS=5 v0/run.sh`). In interactive mode (`-i` or `-c`), prompts override both.
 
 | Key | Default | Description |
 |-----|---------|-------------|
@@ -416,31 +470,6 @@ The config file contains every tunable variable. Each key is uppercased and expo
 | `image_map_file` | *(empty)* | Path to image redirect map file |
 | `image_pull_secret` | *(empty)* | Kubernetes Secret name for private registry auth |
 | `skip_image_load` | `0` | Set to `1` to skip bundled image loading |
-
-### Contention mode variables
-
-These control which stress modes are active and their parameters. They can be set via environment variables or `config.yaml`. In interactive mode the enable/disable prompts override the `MODE_*` values; in non-interactive mode (`NONINTERACTIVE=1`) these variables are used directly.
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MODE_CPU` | `on` | Enable CPU contention |
-| `MODE_MEM` | `on` | Enable memory contention |
-| `MODE_DISK` | `off` | Enable disk contention |
-| `MODE_NETWORK` | `off` | Enable network contention |
-| `MODE_API` | `off` | Enable API stress (ConfigMap CRUD flood) |
-| `RAMP_DISK_REPLICAS` | `1` | Disk-stress Deployments per step |
-| `RAMP_DISK_MB` | `64` | MB to write per disk-stress pod |
-| `RAMP_NET_REPLICAS` | `1` | Network-stress Deployments per step |
-| `RAMP_NET_INTERVAL` | `0.5` | Seconds between network requests per pod |
-| `RAMP_API_QPS` | `20` | API stress queries per second |
-| `RAMP_API_BURST` | `40` | API stress burst limit |
-| `RAMP_API_ITERATIONS` | `50` | Number of kube-burner iterations per ramp step |
-| `RAMP_API_REPLICAS` | `5` | ConfigMaps created per iteration |
-| `IMAGE_PULL_SECRET` | *(empty)* | Kubernetes Secret name for private registry auth (injected into all pod specs) |
-| `SKIP_IMAGE_LOAD` | `0` | Set to `1` to skip loading the bundled image tar into the cluster |
-| `PROBE_READYZ` | `1` | Set to `0` to disable the `/readyz` probe (useful if the endpoint is restricted) |
-| `CLUSTER_MONITOR` | `0` | Set to `1` to enable cluster resource monitoring during the run |
-| `MONITOR_INTERVAL` | `10` | Seconds between monitor snapshots |
 
 ### Cluster monitor
 
@@ -647,7 +676,7 @@ kube-burner job definition for the probe phase. Creates a single Kubernetes Job 
 
 ### `workloads/ramp-step.yaml`
 
-kube-burner job definition for each ramp step. The checked-in file references all four stress templates (CPU, memory, disk, network) plus the probe job. At runtime, `run.sh` generates a filtered copy in staging that includes only the enabled modes' objects.
+kube-burner job definition for each ramp step. The checked-in file references all stress templates (CPU, memory, disk, network echo server + service + clients, API ConfigMap + Secret) plus the probe job. At runtime, `run.sh` generates a filtered copy in staging that includes only the enabled modes' objects.
 
 ### `templates/probe-job.yaml`
 

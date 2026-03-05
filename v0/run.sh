@@ -105,6 +105,8 @@ RAMP_API_QPS="${RAMP_API_QPS:-20}"
 RAMP_API_BURST="${RAMP_API_BURST:-40}"
 RAMP_API_ITERATIONS="${RAMP_API_ITERATIONS:-50}"
 RAMP_API_REPLICAS="${RAMP_API_REPLICAS:-5}"
+CLUSTER_MONITOR="${CLUSTER_MONITOR:-0}"
+MONITOR_INTERVAL="${MONITOR_INTERVAL:-10}"
 
 # ---------------------------------------------------------------------------
 # CLI flags (-i interactive, -c config prompts, -r registry prompts)
@@ -214,6 +216,14 @@ setup_contention_modes() {
     else
       MODE_API="off"
     fi
+
+    echo ""
+    if prompt_yn "Enable cluster monitor (kubectl top)? [Y/n]"; then
+      CLUSTER_MONITOR=1
+      MONITOR_INTERVAL="$(prompt_value '  Monitor interval (seconds)' "$MONITOR_INTERVAL")"
+    else
+      CLUSTER_MONITOR=0
+    fi
   fi
 
   # --- Persist configuration ---
@@ -236,6 +246,8 @@ RAMP_API_QPS=$RAMP_API_QPS
 RAMP_API_BURST=$RAMP_API_BURST
 RAMP_API_ITERATIONS=$RAMP_API_ITERATIONS
 RAMP_API_REPLICAS=$RAMP_API_REPLICAS
+CLUSTER_MONITOR=$CLUSTER_MONITOR
+MONITOR_INTERVAL=$MONITOR_INTERVAL
 EOF
 
   local cpu_en mem_en disk_en net_en api_en
@@ -253,7 +265,8 @@ EOF
     "disk":    {"enabled": $disk_en, "replicas": $RAMP_DISK_REPLICAS, "diskMb": $RAMP_DISK_MB},
     "network": {"enabled": $net_en, "replicas": $RAMP_NET_REPLICAS, "target": "$RAMP_NET_TARGET", "intervalSec": "$RAMP_NET_INTERVAL"},
     "api":     {"enabled": $api_en, "qps": $RAMP_API_QPS, "burst": $RAMP_API_BURST, "iterations": $RAMP_API_ITERATIONS, "replicas": $RAMP_API_REPLICAS}
-  }
+  },
+  "monitor": {"enabled": $([ "$CLUSTER_MONITOR" = "1" ] && echo true || echo false), "intervalSec": $MONITOR_INTERVAL}
 }
 EOF
 
@@ -264,6 +277,11 @@ EOF
   printf "    disk    = %-3s  (replicas=%s, mb=%s)\n" "$MODE_DISK" "$RAMP_DISK_REPLICAS" "$RAMP_DISK_MB"
   printf "    network = %-3s  (replicas=%s, target=%s, interval=%ss)\n" "$MODE_NETWORK" "$RAMP_NET_REPLICAS" "$RAMP_NET_TARGET" "$RAMP_NET_INTERVAL"
   printf "    api     = %-3s  (qps=%s, burst=%s, iterations=%s, replicas=%s)\n" "$MODE_API" "$RAMP_API_QPS" "$RAMP_API_BURST" "$RAMP_API_ITERATIONS" "$RAMP_API_REPLICAS"
+  if [ "$CLUSTER_MONITOR" = "1" ]; then
+    printf "    monitor = on   (interval=%ss)\n" "$MONITOR_INTERVAL"
+  else
+    printf "    monitor = off\n"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -524,6 +542,11 @@ MAIN_RC=0
 # Artifact salvage — ALWAYS runs, even on failure
 # ---------------------------------------------------------------------------
 collect_artifacts() {
+  if [ -n "${MONITOR_PID:-}" ] && kill -0 "$MONITOR_PID" 2>/dev/null; then
+    echo ">>> Stopping cluster monitor (PID $MONITOR_PID)"
+    kill "$MONITOR_PID" 2>/dev/null || true
+    wait "$MONITOR_PID" 2>/dev/null || true
+  fi
   echo ">>> Collecting artifacts into $RUN_DIR"
   # kube-burner log files
   for f in "$V0_DIR"/kube-burner-*.log; do
@@ -706,6 +729,17 @@ fi
 
 echo ">>> Setting up RBAC for probes"
 kubectl apply -f "$WORK_DIR/manifests/probe-rbac.yaml"
+
+# --- CLUSTER MONITOR ---
+MONITOR_PID=""
+if [ "$CLUSTER_MONITOR" = "1" ]; then
+  echo ">>> Starting cluster monitor (interval=${MONITOR_INTERVAL}s)"
+  MONITOR_OUTPUT="$RUN_DIR/cluster-monitor.log" \
+  MONITOR_INTERVAL="$MONITOR_INTERVAL" \
+    bash "$V0_DIR/scripts/cluster-monitor.sh" &
+  MONITOR_PID=$!
+  echo ">>> Cluster monitor PID: $MONITOR_PID"
+fi
 
 # --- BASELINE ---
 run_probe "baseline" "$BASELINE_PROBE_DURATION" "$BASELINE_PROBE_INTERVAL" || MAIN_RC=1

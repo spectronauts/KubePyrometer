@@ -419,6 +419,43 @@ These control which stress modes are active and their parameters. They can be se
 | `IMAGE_PULL_SECRET` | *(empty)* | Kubernetes Secret name for private registry auth (injected into all pod specs) |
 | `SKIP_IMAGE_LOAD` | `0` | Set to `1` to skip loading the bundled image tar into the cluster |
 | `PROBE_READYZ` | `1` | Set to `0` to disable the `/readyz` probe (useful if the endpoint is restricted) |
+| `CLUSTER_MONITOR` | `0` | Set to `1` to enable cluster resource monitoring during the run |
+| `MONITOR_INTERVAL` | `10` | Seconds between monitor snapshots |
+
+### Cluster monitor
+
+The harness includes an optional lightweight cluster monitor that captures resource usage throughout the test -- useful when Prometheus is not available.
+
+When enabled, it runs in the background and writes timestamped snapshots to `cluster-monitor.log` in the run directory. Each snapshot captures:
+
+- **Node resource usage** (`kubectl top nodes`) -- CPU and memory utilization per node
+- **Pod resource usage** (`kubectl top pods`) -- per-pod consumption in the `kb-stress-*` and `kb-probe` namespaces
+- **Cluster events** -- recent events in the stress namespaces (OOM kills, evictions, scheduling failures)
+- **Node conditions** -- current node status (Ready, MemoryPressure, DiskPressure, etc.)
+
+**Prerequisites:** `metrics-server` must be installed for `kubectl top` to work. It is present by default on EKS, GKE, and AKS. On Kind or k3d, install it separately. If metrics-server is unavailable, the monitor gracefully falls back to events-only mode.
+
+**Enable via interactive mode:**
+
+```bash
+v0/run.sh -i
+# ... contention mode prompts ...
+# Enable cluster monitor (kubectl top)? [Y/n] y
+#   Monitor interval (seconds) [10]: 5
+```
+
+**Enable via environment variable:**
+
+```bash
+CLUSTER_MONITOR=1 MONITOR_INTERVAL=5 v0/run.sh
+```
+
+**Standalone mode** (run in a separate terminal, writes to stdout):
+
+```bash
+bash v0/scripts/cluster-monitor.sh --interval 5
+bash v0/scripts/cluster-monitor.sh --interval 10 --output monitor.log
+```
 
 ### Use a custom kube-burner binary
 
@@ -476,6 +513,7 @@ Each run creates `v0/runs/YYYYMMDD-HHMMSS/` containing:
 - **`summary.csv`** -- Phase-level CSV: phase, uuid, exit_code, start/end epochs, elapsed, pass/fail
 - **`probe-stats.csv`** -- Probe latency percentiles per phase: count, min, p50, p95, max (ms)
 - **`phase-*.log`** -- Raw kube-burner output for each phase
+- **`cluster-monitor.log`** -- Timestamped node/pod resource usage and events (if `CLUSTER_MONITOR=1`)
 - **`image-map.txt`** -- Image registry rewrites applied (or "(no rewrites)")
 - **`staging/`** -- Staged copies of templates, workloads, and manifests used for this run
 
@@ -504,6 +542,7 @@ v0/
 │   ├── save-images.sh              # Pulls and saves container images to images/harness-images.tar
 │   ├── load-images.sh              # Loads bundled images into the current cluster
 │   ├── summarize.sh                # Generates summary.csv + probe-stats.csv from run data
+│   ├── cluster-monitor.sh          # Lightweight cluster resource monitor (kubectl top + events)
 │   └── v0tui.sh                    # Interactive TUI (requires gum; optional fzf, jq)
 │
 ├── workloads/                      # kube-burner job definitions
@@ -532,6 +571,7 @@ v0/
         ├── summary.csv             #   CSV summary of all phases
         ├── probe-stats.csv         #   Probe latency percentiles per phase
         ├── phase-*.log             #   Per-phase kube-burner stdout/stderr
+        ├── cluster-monitor.log     #   Timestamped resource snapshots (if monitor enabled)
         └── staging/                #   Staged templates/workloads/manifests for this run
 ```
 
@@ -569,6 +609,10 @@ Loads `v0/images/harness-images.tar` into the current cluster. Auto-detects Kind
 ### `scripts/summarize.sh`
 
 Parses `phases.jsonl` from a run directory and writes `summary.csv` with columns: `phase, uuid, exit_code, start_epoch, end_epoch, elapsed_seconds, status`. Also computes per-phase probe latency percentiles from `probe.jsonl` and writes `probe-stats.csv` with columns: `phase, count, min_ms, p50_ms, p95_ms, max_ms`.
+
+### `scripts/cluster-monitor.sh`
+
+Lightweight cluster resource monitor. Periodically captures `kubectl top nodes`, `kubectl top pods` (in stress and probe namespaces), recent Kubernetes events, and node conditions. Can be run embedded (started automatically by `run.sh` when `CLUSTER_MONITOR=1`) or standalone in a separate terminal. Requires `metrics-server` for `kubectl top`; gracefully falls back to events-only mode if unavailable.
 
 ### `scripts/v0tui.sh`
 

@@ -55,6 +55,10 @@ jobs:
         replicas: {{.API_REPLICAS}}
         inputVars:
           step: "{{.STEP}}"
+      - objectTemplate: templates/api-stress-secret.yaml
+        replicas: {{.API_REPLICAS}}
+        inputVars:
+          step: "{{.STEP}}"
   - name: "probe-ramp-step-{{.STEP}}"
     jobType: create
     jobIterations: 1

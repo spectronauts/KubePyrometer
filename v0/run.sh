@@ -386,6 +386,10 @@ YAML
         replicas: {{.API_REPLICAS}}
         inputVars:
           step: "{{.STEP}}"
+      - objectTemplate: templates/api-stress-secret.yaml
+        replicas: {{.API_REPLICAS}}
+        inputVars:
+          step: "{{.STEP}}"
 YAML
   fi
 

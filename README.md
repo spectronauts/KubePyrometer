@@ -187,7 +187,7 @@ Network stress uses `wget` to make HTTPS requests to the target. The default tar
 | Iterations (objects per step) | `RAMP_API_ITERATIONS` | `50` |
 | Replicas per iteration | `RAMP_API_REPLICAS` | `5` |
 
-API stress uses kube-burner's native object creation engine to create ConfigMaps at the configured QPS. Each iteration creates `RAMP_API_REPLICAS` ConfigMaps, so the total objects per ramp step is `RAMP_API_ITERATIONS * RAMP_API_REPLICAS`. Every request traverses the full Kubernetes API path: authentication, authorization, admission controllers, etcd write, and watch notifications. No additional container images required -- kube-burner handles this directly.
+API stress uses kube-burner's native object creation engine to create ConfigMaps and Secrets at the configured QPS. Each iteration creates `RAMP_API_REPLICAS` of each object type, so the total objects per ramp step is `RAMP_API_ITERATIONS * RAMP_API_REPLICAS * 2`. Every request traverses the full Kubernetes API path: authentication, authorization, admission controllers, etcd write, and watch notifications. Secrets are slightly heavier than ConfigMaps because the API server encrypts them at rest (when etcd encryption is configured). No additional container images required -- kube-burner handles this directly.
 
 ## Images and registry access
 
@@ -555,7 +555,8 @@ v0/
 │   ├── mem-stress.yaml             #   Deployment: busybox dd into /dev/shm
 │   ├── disk-stress.yaml            #   Deployment: busybox dd write/delete on emptyDir
 │   ├── net-stress.yaml             #   Deployment: busybox wget loop to target host
-│   └── api-stress-configmap.yaml   #   ConfigMap: lightweight object for API flood
+│   ├── api-stress-configmap.yaml   #   ConfigMap: lightweight object for API flood
+│   └── api-stress-secret.yaml     #   Secret: lightweight object for API flood (etcd encryption)
 │
 ├── manifests/
 │   └── probe-rbac.yaml             # Namespace, ServiceAccount, RBAC for probes
@@ -648,7 +649,11 @@ Kubernetes Deployment template. Runs a `busybox:1.36.1` container that makes con
 
 ### `templates/api-stress-configmap.yaml`
 
-Lightweight ConfigMap template used by the API stress mode. kube-burner creates these objects at the configured QPS to flood the Kubernetes API server with CRUD operations. Each request traverses the full API path: authentication, authorization, admission controllers, etcd write, and informer watch notifications. No container images or pods are created -- kube-burner issues the API calls directly.
+Lightweight ConfigMap template used by the API stress mode. kube-burner creates these objects at the configured QPS to flood the Kubernetes API server with CRUD operations. No container images or pods are created -- kube-burner issues the API calls directly.
+
+### `templates/api-stress-secret.yaml`
+
+Lightweight Opaque Secret template used alongside the ConfigMap template in API stress mode. Secrets exercise the etcd encryption path (when encryption at rest is configured), making them a heavier write than ConfigMaps.
 
 ### `manifests/probe-rbac.yaml`
 

@@ -2,9 +2,10 @@
 
 ## Supported Versions
 
-| Version | Supported |
-|---------|-----------|
-| v0.1.x  | Yes       |
+| Version          | Supported          |
+|------------------|--------------------|
+| v0.2.x (preview) | Yes (pre-release)  |
+| v0.1.x           | Yes                |
 
 ## Reporting a Vulnerability
 
@@ -78,7 +79,7 @@ kubectl delete ns kb-probe
 
 8. **Air-gapped clusters.** Use registry redirect (`-r` or `IMAGE_MAP_FILE`) to rewrite image references to an internal mirror. Supply a pre-created `imagePullSecrets` Secret name via `IMAGE_PULL_SECRET`.
 
-9. **Restrict egress if needed.** The only external network access the harness requires is the initial kube-burner download from `github.com` (skipped if the binary is already present). All in-cluster traffic stays within the cluster. The default network stress target (`kubernetes.default.svc`) is cluster-internal.
+9. **Restrict egress if needed.** The only external network access the harness requires is the initial kube-burner download from `github.com` (skipped if the binary is already present). All in-cluster traffic stays within the cluster. Network stress targets the harness's own `net-echo` echo server (`net-echo:8080`), not any external endpoint.
 
 ### After Runs
 

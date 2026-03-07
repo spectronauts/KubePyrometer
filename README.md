@@ -49,7 +49,37 @@ Example probe JSONL line (`probe.jsonl`):
 
 **This tool creates real resource pressure on your cluster.** CPU and memory stress pods consume actual compute resources. On small or production clusters, aggressive settings can cause node pressure, pod evictions, or degraded API responsiveness for all tenants.
 
-Recommendations:
+### Built-in guardrails
+
+Before creating any cluster resources, the harness computes a **safety plan** estimating the total pods, namespaces, and API objects the run will create. If estimated usage exceeds configurable limits, the run is blocked:
+
+- **Interactive mode** -- prompts for confirmation before proceeding.
+- **Non-interactive mode** -- aborts with a clear message. Set `SAFETY_BYPASS=1` to override (prints a prominent warning).
+
+The safety plan is always written to `safety-plan.txt` in the run directory for review and audit.
+
+Default limits (configurable via `config.yaml` or environment variables):
+
+| Limit | Default | Env var |
+|-------|---------|---------|
+| Max cumulative pods | 2000 | `SAFETY_MAX_PODS` |
+| Max namespaces | 100 | `SAFETY_MAX_NAMESPACES` |
+| Max API objects per step | 5000 | `SAFETY_MAX_OBJECTS_PER_STEP` |
+
+### Failure detection
+
+During ramp steps, the harness checks for namespace creation failures, pods stuck in `Pending` with `FailedScheduling` events, and quota violations. If a health check fails, the ramp is aborted, teardown runs immediately, and the failure is logged to `failures.log` with timestamps and reasons.
+
+### Config profiles
+
+For large or production clusters, use the `large` profile for safer defaults (smaller increments, longer probe windows, tighter safety limits):
+
+```bash
+v0/run.sh -p large
+# or: CONFIG_PROFILE=large v0/run.sh
+```
+
+### Recommendations
 
 - **Start small.** The defaults (1 replica, 50m CPU, 32 Mi memory, 2 ramp steps) are intentionally conservative.
 - **Test in non-production first.** Use a Kind cluster (`v0/scripts/kind-smoke.sh`) or a dedicated test cluster before running against shared infrastructure.
@@ -94,6 +124,7 @@ v0/run.sh              # non-interactive (default)
 v0/run.sh -i           # fully interactive (modes + registry)
 v0/run.sh -c           # prompt for contention mode selection/settings
 v0/run.sh -r           # prompt for image registry redirect + pull secret
+v0/run.sh -p large     # load a config profile (e.g., safer defaults for production)
 v0/run.sh -cr          # prompt for both
 v0/run.sh -h           # show usage help
 ```
@@ -467,6 +498,9 @@ Contains every tunable variable. Each key is uppercased and exported as an env v
 | `ramp_api_replicas` | `5` | ConfigMaps + Secrets created per iteration |
 | `cluster_monitor` | `0` | Set to `1` for resource monitoring during run |
 | `monitor_interval` | `10` | Seconds between monitor snapshots |
+| `safety_max_pods` | `2000` | Abort if estimated cumulative pods exceed this |
+| `safety_max_namespaces` | `100` | Abort if estimated namespaces exceed this |
+| `safety_max_objects_per_step` | `5000` | Abort if estimated API objects per step exceed this |
 | `image_map_file` | *(empty)* | Path to image redirect map file |
 | `image_pull_secret` | *(empty)* | Kubernetes Secret name for private registry auth |
 | `skip_image_load` | `0` | Set to `1` to skip bundled image loading |
@@ -529,7 +563,7 @@ bash v0/scripts/build-kube-burner.sh
 
 **`/readyz` may be restricted.** Some managed Kubernetes services restrict access to the `/readyz` endpoint. If you see persistent `exit_code` failures for the `readyz` probe, set `PROBE_READYZ=0` to disable it. The `list-nodes` and `list-configmaps` probes will continue to measure control-plane latency.
 
-**kube-burner version must be v2.4.0.** The harness pins kube-burner v2.4.0 and enforces this on all resolution paths. If you set `KB_BIN` to a binary that reports a different version, `run.sh` will refuse to start. Set `KB_ALLOW_ANY=1` to bypass the version check if you know what you are doing.
+**kube-burner version must be 2.4.x.** The harness accepts any kube-burner 2.4.x patch release (e.g., v2.4.0, v2.4.1) and installs v2.4.0 by default. If you set `KB_BIN` to a binary that reports a different minor version, `run.sh` will refuse to start. Set `KB_ALLOW_ANY=1` to bypass the version check if you know what you are doing.
 
 **Templates are staged per run.** `run.sh` copies templates, workloads, and manifests into a staging directory (`$RUN_DIR/staging/`) before each run. The staged `ramp-step.yaml` is generated to include only the enabled contention modes, and any image rewrites are applied to the staged copies. This keeps every run fully isolated from source files and from other runs.
 
@@ -557,14 +591,28 @@ Each run creates `v0/runs/YYYYMMDD-HHMMSS/` containing:
 - **`kb-version.txt`** -- Binary path and full version output
 - **`modes.env`** -- Human-readable KEY=VALUE record of selected contention modes and settings
 - **`modes.json`** -- Machine-readable JSON of the same mode configuration
+- **`safety-plan.txt`** -- Pre-flight safety plan: estimated pods, namespaces, API objects, and limit checks
+- **`cluster-fingerprint.txt`** -- Best-effort cluster metadata: K8s version, node count, allocatable resources, CNI, metrics-server
 - **`phases.jsonl`** -- One JSON line per phase: `{"phase", "uuid", "rc", "start", "end", "elapsed_s"}`
 - **`probe.jsonl`** -- One JSON line per probe check: `{"ts", "phase", "probe", "latency_ms", "exit_code", "seq"}`
 - **`summary.csv`** -- Phase-level CSV: phase, uuid, exit_code, start/end epochs, elapsed, pass/fail
 - **`probe-stats.csv`** -- Probe latency percentiles per phase: count, min, p50, p95, max (ms)
 - **`phase-*.log`** -- Raw kube-burner output for each phase
+- **`failures.log`** -- Failure events with timestamps and reasons (only if failures occurred)
 - **`cluster-monitor.log`** -- Timestamped node/pod resource usage and events (if `CLUSTER_MONITOR=1`)
 - **`image-map.txt`** -- Image registry rewrites applied (or "(no rewrites)")
 - **`staging/`** -- Staged copies of templates, workloads, and manifests used for this run
+
+## Sharing results (support bundle)
+
+Use `scripts/bundle-run.sh` to package a run's artifacts into a `.tar.gz` for sharing with teammates or support:
+
+```bash
+bash v0/scripts/bundle-run.sh v0/runs/20260306-113300
+# Creates: v0/runs/20260306-113300/kubepyrometer-20260306-113300.tar.gz
+```
+
+The bundle includes summaries, JSONL data, phase logs, cluster fingerprint, failure logs, and configuration snapshots. It excludes the `staging/` directory (bulky template copies) and any cluster credentials. The resulting archive is safe to attach to tickets or send to colleagues for review.
 
 ## Folder structure
 
@@ -579,7 +627,8 @@ v0/
 │   └── .kb-version                 #   Version stamp file
 │
 ├── configs/                        # Custom config files
-│   └── eks-small.yaml              #   Small EKS test parameters
+│   ├── eks-small.yaml              #   Small EKS test parameters
+│   └── profile-large.yaml          #   Profile: safer defaults for large clusters
 │
 ├── images/
 │   └── harness-images.tar          # Bundled container images (busybox + kubectl)
@@ -592,6 +641,7 @@ v0/
 │   ├── load-images.sh              # Loads bundled images into the current cluster
 │   ├── summarize.sh                # Generates summary.csv + probe-stats.csv from run data
 │   ├── cluster-monitor.sh          # Lightweight cluster resource monitor (kubectl top + events)
+│   ├── bundle-run.sh               # Packages run artifacts into a shareable .tar.gz
 │   └── v0tui.sh                    # Interactive TUI (requires gum; optional fzf, jq)
 │
 ├── workloads/                      # kube-burner job definitions
@@ -617,12 +667,15 @@ v0/
         ├── kb-version.txt          #   Binary path + version output
         ├── modes.env               #   Contention mode selection + settings (KEY=VALUE)
         ├── modes.json              #   Same as modes.env in JSON format
+        ├── safety-plan.txt         #   Pre-flight safety plan + limit checks
+        ├── cluster-fingerprint.txt #   Best-effort cluster metadata snapshot
         ├── image-map.txt           #   Image registry rewrites (if any)
         ├── phases.jsonl            #   One JSON object per phase (rc, elapsed, uuid)
         ├── probe.jsonl             #   Probe measurements (latency, exit code, seq)
         ├── summary.csv             #   CSV summary of all phases
         ├── probe-stats.csv         #   Probe latency percentiles per phase
         ├── phase-*.log             #   Per-phase kube-burner stdout/stderr
+        ├── failures.log            #   Failure events with reasons (if any)
         ├── cluster-monitor.log     #   Timestamped resource snapshots (if monitor enabled)
         └── staging/                #   Staged templates/workloads/manifests for this run
 ```
@@ -631,7 +684,7 @@ v0/
 
 ### `run.sh`
 
-The main entrypoint. Accepts `-i` (full interactive), `-c` (contention mode prompts), `-r` (registry redirect prompts), or no flags (non-interactive default). Resolves the kube-burner binary, parses `config.yaml`, stages templates into the run directory, generates a filtered `ramp-step.yaml` containing only the enabled modes, optionally applies image registry rewrites and `imagePullSecrets`, loads bundled images, applies RBAC, then orchestrates the four-phase sequence. All artifacts are collected into a timestamped `runs/` directory, even on failure.
+The main entrypoint. Accepts `-i` (full interactive), `-c` (contention mode prompts), `-r` (registry redirect prompts), `-p PROFILE` (load a config profile), or no flags (non-interactive default). Resolves the kube-burner binary, parses `config.yaml` (and an optional profile), stages templates into the run directory, generates a filtered `ramp-step.yaml` containing only the enabled modes, computes and enforces safety limits, optionally applies image registry rewrites and `imagePullSecrets`, loads bundled images, applies RBAC, collects a cluster fingerprint, then orchestrates the four-phase sequence. During ramp steps, it checks for scheduling failures and quota violations, aborting early if issues are detected. All artifacts are collected into a timestamped `runs/` directory, even on failure.
 
 **kube-burner resolution order:**
 1. `KB_BIN` env var (must be executable; version-checked against v2.4.0 unless `KB_ALLOW_ANY=1`)
@@ -665,6 +718,10 @@ Parses `phases.jsonl` from a run directory and writes `summary.csv` with columns
 ### `scripts/cluster-monitor.sh`
 
 Lightweight cluster resource monitor. Periodically captures `kubectl top nodes`, `kubectl top pods` (in stress and probe namespaces), recent Kubernetes events, and node conditions. Can be run embedded (started automatically by `run.sh` when `CLUSTER_MONITOR=1`) or standalone in a separate terminal. Requires `metrics-server` for `kubectl top`; gracefully falls back to events-only mode if unavailable.
+
+### `scripts/bundle-run.sh`
+
+Packages a run directory's artifacts into a shareable `.tar.gz` support bundle. Includes summaries, JSONL data, phase logs, cluster fingerprint, failure logs, and configuration snapshots. Excludes the `staging/` directory and cluster credentials. Usage: `bash v0/scripts/bundle-run.sh v0/runs/YYYYMMDD-HHMMSS`.
 
 ### `scripts/v0tui.sh`
 

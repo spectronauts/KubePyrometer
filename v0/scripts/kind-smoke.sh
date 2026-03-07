@@ -98,6 +98,8 @@ assert "probe.jsonl exists and is non-empty" test -s "${LATEST_RUN}probe.jsonl"
 assert "phases.jsonl exists" test -s "${LATEST_RUN}phases.jsonl"
 assert "summary.csv exists" test -s "${LATEST_RUN}summary.csv"
 assert "kb-version.txt exists" test -s "${LATEST_RUN}kb-version.txt"
+assert "safety-plan.txt exists" test -s "${LATEST_RUN}safety-plan.txt"
+assert "cluster-fingerprint.txt exists" test -s "${LATEST_RUN}cluster-fingerprint.txt"
 
 assert "baseline phase present in phases.jsonl" \
   grep -q '"phase":"baseline"' "${LATEST_RUN}phases.jsonl"

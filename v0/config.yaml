@@ -41,6 +41,13 @@ ramp_api_replicas: 5
 cluster_monitor: 0
 monitor_interval: 10
 
+# ─── Safety limits ────────────────────────────────────────────
+# The run will abort if estimated resource usage exceeds these
+# limits (unless SAFETY_BYPASS=1 or confirmed interactively).
+safety_max_pods: 2000
+safety_max_namespaces: 100
+safety_max_objects_per_step: 5000
+
 # ─── Images / registry ────────────────────────────────────────
 # Uncomment and set these for air-gapped or private-registry clusters.
 # image_map_file: /path/to/image-map.txt

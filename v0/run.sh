@@ -5,15 +5,16 @@ V0_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONFIG_FILE="${CONFIG_FILE:-$V0_DIR/config.yaml}"
 
 KB_REQUIRED_VERSION="v2.4.0"
+KB_REQUIRED_MINOR="2.4."
 
 resolve_kb() {
   # 1) Explicit override
   if [ -n "${KB_BIN:-}" ] && [ -x "$KB_BIN" ]; then
     if [ "${KB_ALLOW_ANY:-0}" != "1" ]; then
-      if ! "$KB_BIN" version 2>&1 | grep -q "${KB_REQUIRED_VERSION#v}"; then
-        echo "ERROR: KB_BIN ($KB_BIN) does not report $KB_REQUIRED_VERSION:"
+      if ! "$KB_BIN" version 2>&1 | grep -q "${KB_REQUIRED_MINOR}"; then
+        echo "ERROR: KB_BIN ($KB_BIN) does not report kube-burner 2.4.x:"
         "$KB_BIN" version 2>&1 | head -5
-        echo "Set KB_ALLOW_ANY=1 to accept any version, or point KB_BIN to a $KB_REQUIRED_VERSION binary."
+        echo "Set KB_ALLOW_ANY=1 to accept any version, or point KB_BIN to a 2.4.x binary."
         exit 1
       fi
     fi
@@ -22,11 +23,11 @@ resolve_kb() {
     return 0
   fi
 
-  # 2) System kube-burner matching required version
+  # 2) System kube-burner matching required minor version
   if command -v kube-burner &>/dev/null; then
-    if kube-burner version 2>&1 | grep -q "${KB_REQUIRED_VERSION#v}"; then
+    if kube-burner version 2>&1 | grep -q "${KB_REQUIRED_MINOR}"; then
       KB="$(command -v kube-burner)"
-      echo ">>> Using system kube-burner ($KB_REQUIRED_VERSION): $KB"
+      echo ">>> Using system kube-burner (2.4.x): $KB"
       return 0
     fi
   fi
@@ -70,6 +71,53 @@ parse_config() {
   done < "$file"
 }
 
+# ---------------------------------------------------------------------------
+# CLI flags (-i interactive, -c config prompts, -r registry prompts)
+# Must be parsed before config/profile loading so -p takes effect.
+# ---------------------------------------------------------------------------
+PROMPT_MODES=false
+PROMPT_REGISTRY=false
+
+while getopts "icrp:h" opt; do
+  case "$opt" in
+    i) PROMPT_MODES=true; PROMPT_REGISTRY=true ;;
+    c) PROMPT_MODES=true ;;
+    r) PROMPT_REGISTRY=true ;;
+    p) export CONFIG_PROFILE="$OPTARG" ;;
+    h) echo "Usage: run.sh [-i] [-c] [-r] [-p PROFILE]"
+       echo "  -i          Interactive (prompt for everything)"
+       echo "  -c          Prompt for contention mode selection/settings"
+       echo "  -r          Prompt for image registry redirect and pull secret"
+       echo "  -p PROFILE  Load a config profile (e.g., 'large')"
+       echo "  Default: non-interactive, uses config.yaml / env var defaults"
+       exit 0 ;;
+    *) echo "Usage: run.sh [-i] [-c] [-r] [-p PROFILE] [-h]" >&2; exit 1 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+# Backward compat: NONINTERACTIVE=1 forces non-interactive regardless of flags
+if [ "${NONINTERACTIVE:-0}" = "1" ]; then
+  PROMPT_MODES=false
+  PROMPT_REGISTRY=false
+fi
+
+# ---------------------------------------------------------------------------
+# Config profiles (loaded before config.yaml so profile values take precedence
+# over generic defaults, but env vars still override everything)
+# Precedence: env vars > profile > config.yaml > built-in defaults
+# ---------------------------------------------------------------------------
+if [ -n "${CONFIG_PROFILE:-}" ]; then
+  PROFILE_FILE="$V0_DIR/configs/profile-${CONFIG_PROFILE}.yaml"
+  if [ -f "$PROFILE_FILE" ]; then
+    echo ">>> Loading profile: $CONFIG_PROFILE ($PROFILE_FILE)"
+    parse_config "$PROFILE_FILE"
+  else
+    echo "ERROR: unknown profile '$CONFIG_PROFILE' (no $PROFILE_FILE)"
+    exit 1
+  fi
+fi
+
 parse_config "$CONFIG_FILE"
 
 # ---------------------------------------------------------------------------
@@ -110,32 +158,12 @@ CLUSTER_MONITOR="${CLUSTER_MONITOR:-0}"
 MONITOR_INTERVAL="${MONITOR_INTERVAL:-10}"
 
 # ---------------------------------------------------------------------------
-# CLI flags (-i interactive, -c config prompts, -r registry prompts)
+# Safety limits
 # ---------------------------------------------------------------------------
-PROMPT_MODES=false
-PROMPT_REGISTRY=false
-
-while getopts "icrh" opt; do
-  case "$opt" in
-    i) PROMPT_MODES=true; PROMPT_REGISTRY=true ;;
-    c) PROMPT_MODES=true ;;
-    r) PROMPT_REGISTRY=true ;;
-    h) echo "Usage: run.sh [-i] [-c] [-r]"
-       echo "  -i  Interactive (prompt for everything)"
-       echo "  -c  Prompt for contention mode selection/settings"
-       echo "  -r  Prompt for image registry redirect and pull secret"
-       echo "  Default: non-interactive, uses config.yaml / env var defaults"
-       exit 0 ;;
-    *) echo "Usage: run.sh [-i] [-c] [-r] [-h]" >&2; exit 1 ;;
-  esac
-done
-shift $((OPTIND - 1))
-
-# Backward compat: NONINTERACTIVE=1 forces non-interactive regardless of flags
-if [ "${NONINTERACTIVE:-0}" = "1" ]; then
-  PROMPT_MODES=false
-  PROMPT_REGISTRY=false
-fi
+SAFETY_MAX_PODS="${SAFETY_MAX_PODS:-2000}"
+SAFETY_MAX_NAMESPACES="${SAFETY_MAX_NAMESPACES:-100}"
+SAFETY_MAX_OBJECTS_PER_STEP="${SAFETY_MAX_OBJECTS_PER_STEP:-5000}"
+SAFETY_BYPASS="${SAFETY_BYPASS:-0}"
 
 # ---------------------------------------------------------------------------
 # Interactive helpers
@@ -531,6 +559,265 @@ apply_image_pull_secret() {
 }
 
 # ---------------------------------------------------------------------------
+# Safety: estimate what the run will create
+# ---------------------------------------------------------------------------
+EST_PODS_PER_STEP=0
+EST_MAX_PODS=0
+EST_MAX_NAMESPACES=0
+EST_API_OBJECTS_PER_STEP=0
+EST_MAX_API_OBJECTS=0
+
+estimate_run_impact() {
+  local pods=1  # probe pod per step
+  [ "$MODE_CPU" = "on" ]     && pods=$((pods + RAMP_CPU_REPLICAS))
+  [ "$MODE_MEM" = "on" ]     && pods=$((pods + RAMP_MEM_REPLICAS))
+  [ "$MODE_DISK" = "on" ]    && pods=$((pods + RAMP_DISK_REPLICAS))
+  [ "$MODE_NETWORK" = "on" ] && pods=$((pods + RAMP_NET_REPLICAS + 2))  # clients + echo server
+  EST_PODS_PER_STEP=$pods
+  EST_MAX_PODS=$((pods * RAMP_STEPS))
+  EST_MAX_NAMESPACES=$((RAMP_STEPS + 1))  # kb-stress-N + kb-probe
+
+  if [ "$MODE_API" = "on" ]; then
+    EST_API_OBJECTS_PER_STEP=$((RAMP_API_ITERATIONS * RAMP_API_REPLICAS * 2))
+  fi
+  EST_MAX_API_OBJECTS=$((EST_API_OBJECTS_PER_STEP * RAMP_STEPS))
+}
+
+write_safety_plan() {
+  local plan="$RUN_DIR/safety-plan.txt"
+  local ctx
+  ctx=$(kubectl config current-context 2>/dev/null || echo "unknown")
+
+  {
+    echo "KubePyrometer Safety Plan"
+    echo "========================="
+    echo "Run ID:           $RUN_ID"
+    echo "Cluster context:  $ctx"
+    echo "Ramp steps:       $RAMP_STEPS"
+    echo ""
+    echo "Enabled modes:"
+    [ "$MODE_CPU" = "on" ]     && printf "  cpu      %d replicas/step x %sm\n" "$RAMP_CPU_REPLICAS" "$RAMP_CPU_MILLICORES"
+    [ "$MODE_MEM" = "on" ]     && printf "  mem      %d replicas/step x %d MB (tmpfs)\n" "$RAMP_MEM_REPLICAS" "$RAMP_MEM_MB"
+    [ "$MODE_DISK" = "on" ]    && printf "  disk     %d replicas/step x %d MB (emptyDir -- node disk)\n" "$RAMP_DISK_REPLICAS" "$RAMP_DISK_MB"
+    [ "$MODE_NETWORK" = "on" ] && printf "  network  %d replicas/step @ %ss interval\n" "$RAMP_NET_REPLICAS" "$RAMP_NET_INTERVAL"
+    [ "$MODE_API" = "on" ]     && printf "  api      %d iterations x %d replicas @ %d QPS\n" "$RAMP_API_ITERATIONS" "$RAMP_API_REPLICAS" "$RAMP_API_QPS"
+    echo ""
+    echo "Estimated impact:"
+    printf "  Max namespaces:        %d (%d stress + 1 probe)\n" "$EST_MAX_NAMESPACES" "$RAMP_STEPS"
+    printf "  Pods per step:         %d\n" "$EST_PODS_PER_STEP"
+    printf "  Max cumulative pods:   %d (%d x %d steps, no cleanup between steps)\n" "$EST_MAX_PODS" "$EST_PODS_PER_STEP" "$RAMP_STEPS"
+    if [ "$MODE_API" = "on" ]; then
+      printf "  API objects per step:  %d (%d x %d x 2)\n" "$EST_API_OBJECTS_PER_STEP" "$RAMP_API_ITERATIONS" "$RAMP_API_REPLICAS"
+      printf "  Max cumulative API:    %d\n" "$EST_MAX_API_OBJECTS"
+    fi
+    echo ""
+    echo "Safety limits:"
+    local pods_ok="OK" ns_ok="OK" obj_ok="OK"
+    [ "$EST_MAX_PODS" -gt "$SAFETY_MAX_PODS" ] && pods_ok="EXCEEDED ($EST_MAX_PODS > $SAFETY_MAX_PODS)"
+    [ "$EST_MAX_NAMESPACES" -gt "$SAFETY_MAX_NAMESPACES" ] && ns_ok="EXCEEDED ($EST_MAX_NAMESPACES > $SAFETY_MAX_NAMESPACES)"
+    [ "$EST_API_OBJECTS_PER_STEP" -gt "$SAFETY_MAX_OBJECTS_PER_STEP" ] && obj_ok="EXCEEDED ($EST_API_OBJECTS_PER_STEP > $SAFETY_MAX_OBJECTS_PER_STEP)"
+    printf "  Max pods:              %-6d  %s\n" "$SAFETY_MAX_PODS" "$pods_ok"
+    printf "  Max namespaces:        %-6d  %s\n" "$SAFETY_MAX_NAMESPACES" "$ns_ok"
+    printf "  Max objects per step:  %-6d  %s\n" "$SAFETY_MAX_OBJECTS_PER_STEP" "$obj_ok"
+    echo ""
+    if [ "$pods_ok" != "OK" ] || [ "$ns_ok" != "OK" ] || [ "$obj_ok" != "OK" ]; then
+      if [ "$SAFETY_BYPASS" = "1" ]; then
+        echo "Status: BYPASS ACTIVE (SAFETY_BYPASS=1)"
+      elif [ "$PROMPT_MODES" = "true" ]; then
+        echo "Status: AWAITING CONFIRMATION"
+      else
+        echo "Status: BLOCKED (set SAFETY_BYPASS=1 to override)"
+      fi
+    else
+      echo "Status: OK (all limits satisfied)"
+    fi
+  } > "$plan"
+  cat "$plan"
+}
+
+enforce_safety_limits() {
+  local exceeded=false
+  [ "$EST_MAX_PODS" -gt "$SAFETY_MAX_PODS" ] && exceeded=true
+  [ "$EST_MAX_NAMESPACES" -gt "$SAFETY_MAX_NAMESPACES" ] && exceeded=true
+  [ "$EST_API_OBJECTS_PER_STEP" -gt "$SAFETY_MAX_OBJECTS_PER_STEP" ] && exceeded=true
+
+  if [ "$exceeded" = "false" ]; then
+    return 0
+  fi
+
+  echo ""
+  echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+  echo "  WARNING: SAFETY LIMITS EXCEEDED"
+  echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+  [ "$EST_MAX_PODS" -gt "$SAFETY_MAX_PODS" ] && \
+    echo "  - Max pods: $EST_MAX_PODS exceeds limit $SAFETY_MAX_PODS"
+  [ "$EST_MAX_NAMESPACES" -gt "$SAFETY_MAX_NAMESPACES" ] && \
+    echo "  - Max namespaces: $EST_MAX_NAMESPACES exceeds limit $SAFETY_MAX_NAMESPACES"
+  [ "$EST_API_OBJECTS_PER_STEP" -gt "$SAFETY_MAX_OBJECTS_PER_STEP" ] && \
+    echo "  - API objects per step: $EST_API_OBJECTS_PER_STEP exceeds limit $SAFETY_MAX_OBJECTS_PER_STEP"
+  echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+  echo ""
+
+  if [ "$SAFETY_BYPASS" = "1" ]; then
+    echo ">>> SAFETY_BYPASS=1 is set -- proceeding despite exceeded limits."
+    return 0
+  fi
+
+  if [ "$PROMPT_MODES" = "true" ]; then
+    if ! prompt_yn "Safety limits exceeded. Continue anyway? [y/N]" "n"; then
+      echo "Aborted by user."
+      exit 1
+    fi
+    return 0
+  fi
+
+  echo "Aborting. Reduce settings, raise limits in config.yaml, or set SAFETY_BYPASS=1."
+  exit 1
+}
+
+# ---------------------------------------------------------------------------
+# Cluster fingerprint (best-effort, never fails the run)
+# ---------------------------------------------------------------------------
+collect_cluster_fingerprint() {
+  local fp="$RUN_DIR/cluster-fingerprint.txt"
+  echo ">>> Collecting cluster fingerprint"
+  {
+    echo "Cluster Fingerprint"
+    echo "==================="
+    echo ""
+
+    local ctx
+    ctx=$(kubectl config current-context 2>/dev/null || echo "unknown")
+    echo "Context: $ctx"
+    echo ""
+
+    echo "Kubernetes version:"
+    kubectl version --short 2>/dev/null || kubectl version 2>/dev/null || echo "  unknown"
+    echo ""
+
+    local node_count
+    node_count=$(kubectl get nodes --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    echo "Nodes: ${node_count:-unknown}"
+    local alloc_cpu alloc_mem
+    alloc_cpu=$(kubectl get nodes -o jsonpath='{range .items[*]}{.status.allocatable.cpu}{"\n"}{end}' 2>/dev/null | \
+      awk '{
+        v=$1;
+        if (v ~ /m$/) { sub(/m$/,"",v); total+=v }
+        else { total+=v*1000 }
+      } END { printf "%dm", total }' 2>/dev/null || echo "unknown")
+    alloc_mem=$(kubectl get nodes -o jsonpath='{range .items[*]}{.status.allocatable.memory}{"\n"}{end}' 2>/dev/null | \
+      awk '{
+        v=$1;
+        if (v ~ /Ki$/) { sub(/Ki$/,"",v); total+=v/1024 }
+        else if (v ~ /Mi$/) { sub(/Mi$/,"",v); total+=v }
+        else if (v ~ /Gi$/) { sub(/Gi$/,"",v); total+=v*1024 }
+        else { total+=v/1048576 }
+      } END { printf "%dMi", total }' 2>/dev/null || echo "unknown")
+    echo "  Allocatable CPU (total):    $alloc_cpu"
+    echo "  Allocatable Memory (total): $alloc_mem"
+    echo ""
+
+    echo "Node details:"
+    kubectl get nodes -o custom-columns=\
+'NAME:.metadata.name,CPU:.status.allocatable.cpu,MEM:.status.allocatable.memory,RUNTIME:.status.nodeInfo.containerRuntimeVersion' \
+      --no-headers 2>/dev/null | sed 's/^/  /' || echo "  unknown"
+    echo ""
+
+    echo "CNI hints (kube-system daemonsets):"
+    kubectl get daemonsets -n kube-system --no-headers -o custom-columns='NAME:.metadata.name' \
+      2>/dev/null | sed 's/^/  /' || echo "  unknown"
+    echo ""
+
+    echo "kube-proxy mode:"
+    local kp_cm
+    kp_cm=$(kubectl get configmap kube-proxy -n kube-system -o jsonpath='{.data.config\.conf}' 2>/dev/null || \
+            kubectl get configmap kube-proxy -n kube-system -o jsonpath='{.data.kubeconfig\.conf}' 2>/dev/null || true)
+    if [ -n "$kp_cm" ]; then
+      local mode
+      mode=$(echo "$kp_cm" | grep -i 'mode:' | head -1 | awk '{print $2}' 2>/dev/null || echo "unknown")
+      echo "  ${mode:-iptables (default)}"
+    else
+      echo "  unknown (configmap not readable)"
+    fi
+    echo ""
+
+    echo "API Priority and Fairness:"
+    local fs_count
+    fs_count=$(kubectl get flowschemas --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    if [ "${fs_count:-0}" -gt 0 ]; then
+      echo "  $fs_count FlowSchemas found"
+    else
+      echo "  not readable or not enabled"
+    fi
+    echo ""
+
+    echo "metrics-server:"
+    local ms_deploy
+    ms_deploy=$(kubectl get deployment metrics-server -n kube-system -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+    if [ -n "$ms_deploy" ]; then
+      echo "  present ($ms_deploy)"
+    else
+      echo "  not found"
+    fi
+    echo ""
+
+    echo "Harness settings:"
+    echo "  kube-burner: $KB_REQUIRED_VERSION"
+    echo "  config file: $CONFIG_FILE"
+    [ -n "${CONFIG_PROFILE:-}" ] && echo "  profile:     $CONFIG_PROFILE"
+    echo "  probe readyz: $PROBE_READYZ"
+    echo "  ramp steps:   $RAMP_STEPS"
+    echo "  monitor:      $([ "$CLUSTER_MONITOR" = "1" ] && echo "on (${MONITOR_INTERVAL}s)" || echo "off")"
+  } > "$fp" 2>/dev/null
+  echo ">>> Cluster fingerprint saved to $fp"
+}
+
+# ---------------------------------------------------------------------------
+# Helper: log a failure event
+# ---------------------------------------------------------------------------
+log_failure() {
+  local phase="$1" reason="$2"
+  local ts
+  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  printf '{"ts":"%s","phase":"%s","reason":"%s"}\n' "$ts" "$phase" "$reason" \
+    >> "$RUN_DIR/failures.log"
+  echo ">>> FAILURE: phase=$phase reason=$reason"
+}
+
+# ---------------------------------------------------------------------------
+# Helper: check ramp step health (pending pods, quota errors)
+# ---------------------------------------------------------------------------
+check_step_health() {
+  local step="$1"
+  local ns="kb-stress-$step"
+
+  if ! kubectl get ns "$ns" &>/dev/null; then
+    log_failure "ramp-step-$step" "namespace $ns does not exist"
+    return 1
+  fi
+
+  local pending
+  pending=$(kubectl get pods -n "$ns" --field-selector=status.phase=Pending --no-headers 2>/dev/null | wc -l | tr -d ' ')
+  if [ "${pending:-0}" -gt 0 ]; then
+    local events
+    events=$(kubectl get events -n "$ns" --field-selector=reason=FailedScheduling --no-headers 2>/dev/null | head -3)
+    if [ -n "$events" ]; then
+      log_failure "ramp-step-$step" "$pending pods Pending with FailedScheduling events"
+      return 1
+    fi
+  fi
+
+  local quota_errors
+  quota_errors=$(kubectl get events -n "$ns" --no-headers 2>/dev/null | grep -i 'exceeded quota\|forbidden.*quota' | head -1 || true)
+  if [ -n "$quota_errors" ]; then
+    log_failure "ramp-step-$step" "quota exceeded: $quota_errors"
+    return 1
+  fi
+
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # Run directory — all artifacts land here
 # ---------------------------------------------------------------------------
 RUN_ID="$(date +%Y%m%d-%H%M%S)"
@@ -539,6 +826,9 @@ mkdir -p "$RUN_DIR"
 echo ">>> Run artifacts: $RUN_DIR"
 
 setup_contention_modes
+estimate_run_impact
+write_safety_plan
+enforce_safety_limits
 collect_image_redirects
 ensure_staging
 generate_ramp_step
@@ -586,11 +876,17 @@ cat "$RUN_DIR/kb-version.txt"
 # Helper: record a phase result into phases.jsonl
 # ---------------------------------------------------------------------------
 record_phase() {
-  local phase="$1" uuid="$2" rc="$3" start="$4" end_t="$5"
+  local phase="$1" uuid="$2" rc="$3" start="$4" end_t="$5" error="${6:-}"
   local elapsed=$((end_t - start))
-  printf '{"phase":"%s","uuid":"%s","rc":%d,"start":%d,"end":%d,"elapsed_s":%d}\n' \
-    "$phase" "$uuid" "$rc" "$start" "$end_t" "$elapsed" \
-    >> "$RUN_DIR/phases.jsonl"
+  if [ -n "$error" ]; then
+    printf '{"phase":"%s","uuid":"%s","rc":%d,"start":%d,"end":%d,"elapsed_s":%d,"error":"%s"}\n' \
+      "$phase" "$uuid" "$rc" "$start" "$end_t" "$elapsed" "$error" \
+      >> "$RUN_DIR/phases.jsonl"
+  else
+    printf '{"phase":"%s","uuid":"%s","rc":%d,"start":%d,"end":%d,"elapsed_s":%d}\n' \
+      "$phase" "$uuid" "$rc" "$start" "$end_t" "$elapsed" \
+      >> "$RUN_DIR/phases.jsonl"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -739,6 +1035,9 @@ fi
 echo ">>> Setting up RBAC for probes"
 kubectl apply -f "$WORK_DIR/manifests/probe-rbac.yaml"
 
+# --- CLUSTER FINGERPRINT ---
+collect_cluster_fingerprint
+
 # --- CLUSTER MONITOR ---
 MONITOR_PID=""
 if [ "$CLUSTER_MONITOR" = "1" ]; then
@@ -755,7 +1054,15 @@ run_probe "baseline" "$BASELINE_PROBE_DURATION" "$BASELINE_PROBE_INTERVAL" || MA
 
 # --- RAMP STEPS ---
 for step in $(seq 1 "$RAMP_STEPS"); do
-  run_ramp_step "$step" || MAIN_RC=1
+  if ! run_ramp_step "$step"; then
+    log_failure "ramp-step-$step" "kube-burner exited non-zero"
+    MAIN_RC=1
+    break
+  fi
+  if ! check_step_health "$step"; then
+    MAIN_RC=1
+    break
+  fi
 done
 
 # --- TEARDOWN (always, even if ramp failed) ---

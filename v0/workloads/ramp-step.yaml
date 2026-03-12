@@ -9,6 +9,8 @@ jobs:
     cleanup: false
     waitWhenFinished: true
     maxWaitTimeout: 2m
+    qps: {{.RAMP_QPS}}
+    burst: {{.RAMP_BURST}}
     preLoadImages: false
     verifyObjects: true
     errorOnVerify: false
@@ -73,6 +75,8 @@ jobs:
     cleanup: true
     waitWhenFinished: true
     maxWaitTimeout: 3m
+    qps: {{.RAMP_QPS}}
+    burst: {{.RAMP_BURST}}
     preLoadImages: false
     verifyObjects: true
     errorOnVerify: false

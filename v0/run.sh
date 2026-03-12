@@ -137,6 +137,8 @@ RAMP_PROBE_INTERVAL="${RAMP_PROBE_INTERVAL:-2}"
 KB_TIMEOUT="${KB_TIMEOUT:-5m}"
 SKIP_LOG_FILE="${SKIP_LOG_FILE:-true}"
 PROBE_READYZ="${PROBE_READYZ:-1}"
+RAMP_QPS="${RAMP_QPS:-50}"
+RAMP_BURST="${RAMP_BURST:-100}"
 
 # ---------------------------------------------------------------------------
 # Contention mode defaults
@@ -350,6 +352,8 @@ YAML
     cleanup: false
     waitWhenFinished: true
     maxWaitTimeout: 2m
+    qps: {{.RAMP_QPS}}
+    burst: {{.RAMP_BURST}}
     preLoadImages: false
     verifyObjects: true
     errorOnVerify: false
@@ -435,6 +439,8 @@ YAML
     cleanup: true
     waitWhenFinished: true
     maxWaitTimeout: 3m
+    qps: {{.RAMP_QPS}}
+    burst: {{.RAMP_BURST}}
     preLoadImages: false
     verifyObjects: true
     errorOnVerify: false
@@ -974,6 +980,8 @@ run_ramp_step() {
   export API_BURST="$RAMP_API_BURST"
   export API_ITERATIONS="$RAMP_API_ITERATIONS"
   export API_REPLICAS="$RAMP_API_REPLICAS"
+  export RAMP_QPS
+  export RAMP_BURST
   export RAMP_PROBE_DURATION
   export RAMP_PROBE_INTERVAL
   export PROBE_READYZ

@@ -479,6 +479,8 @@ Contains every tunable variable. Each key is uppercased and exported as an env v
 | `kb_timeout` | `5m` | kube-burner per-phase timeout |
 | `skip_log_file` | `true` | Skip kube-burner's own log file |
 | `probe_readyz` | `1` | Set to `0` to disable `/readyz` probe |
+| `ramp_qps` | `50` | kube-burner client QPS for ramp-step object creation and readiness checks |
+| `ramp_burst` | `100` | kube-burner client burst limit for ramp-step operations |
 | `mode_cpu` | `on` | Enable CPU contention |
 | `mode_mem` | `on` | Enable memory contention |
 | `mode_disk` | `off` | Enable disk contention |

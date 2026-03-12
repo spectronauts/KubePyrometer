@@ -9,6 +9,8 @@ recovery_probe_interval: 2
 kb_timeout: 5m
 skip_log_file: true
 probe_readyz: 1
+ramp_qps: 50
+ramp_burst: 100
 
 # ─── CPU contention ───────────────────────────────────────────
 mode_cpu: on

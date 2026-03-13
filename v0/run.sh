@@ -351,7 +351,7 @@ YAML
     namespacedIterations: false
     cleanup: false
     waitWhenFinished: true
-    maxWaitTimeout: 2m
+    maxWaitTimeout: 5m
     qps: {{.RAMP_QPS}}
     burst: {{.RAMP_BURST}}
     preLoadImages: false
@@ -438,7 +438,7 @@ YAML
     namespacedIterations: false
     cleanup: true
     waitWhenFinished: true
-    maxWaitTimeout: 3m
+    maxWaitTimeout: 5m
     qps: {{.RAMP_QPS}}
     burst: {{.RAMP_BURST}}
     preLoadImages: false
@@ -933,6 +933,8 @@ run_probe() {
   export PROBE_DURATION="$duration"
   export PROBE_INTERVAL="$interval"
   export PROBE_READYZ
+  export RAMP_QPS
+  export RAMP_BURST
 
   rc=0
   "$KB" init "${kb_flags[@]}" 2>&1 | tee "$RUN_DIR/phase-${phase}.log" || rc=$?

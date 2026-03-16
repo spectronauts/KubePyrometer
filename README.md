@@ -32,22 +32,27 @@ cd KubePyrometer
 ./kubepyrometer run       # or: v0/run.sh (still works)
 ```
 
-## Quickstart (30 seconds)
+After installing, run `kubepyrometer init` to generate a config file (`kubepyrometer.yaml`) in your current directory. This file contains every tunable parameter with its default value -- it is the easiest way to see what is configurable and to customize the tool for your cluster. The harness works without a config file (sensible defaults are built in), but having one makes it easy to adjust settings and reproduce runs.
+
+## Quickstart
 
 ```bash
 # 1. Point kubectl at your target cluster
 kubectl config current-context
 
-# 2. Generate a config file (optional -- sensible defaults are built in)
+# 2. Generate a config file (shows all tunable parameters with defaults)
 kubepyrometer init
+# Edit kubepyrometer.yaml to adjust ramp steps, replicas, probe durations, etc.
 
-# 3. Run the harness (non-interactive, default parameters)
+# 3. Run the harness
 kubepyrometer run
 
 # 4. View results
 cat "$(ls -dt runs/*/ | head -1)/summary.csv"
 cat "$(ls -dt runs/*/ | head -1)/probe-stats.csv"
 ```
+
+Step 2 creates a `kubepyrometer.yaml` in the current directory. You can skip it to run with defaults, but reviewing it first is recommended -- it documents every setting the harness uses. See [Configuration](#configuration) for the full reference.
 
 > **Direct invocation:** `v0/run.sh` still works from a repo checkout and behaves identically to previous versions.
 
@@ -115,7 +120,7 @@ kubepyrometer run -p large
 - **Start small.** The defaults (1 replica, 50m CPU, 32 Mi memory, 2 ramp steps) are intentionally conservative.
 - **Test in non-production first.** Use a Kind cluster (`v0/scripts/kind-smoke.sh`) or a dedicated test cluster before running against shared infrastructure.
 - **Monitor during runs.** Watch node conditions (`kubectl top nodes`) and API server latency from outside the harness.
-- **Know your teardown.** The harness deletes stress namespaces automatically, but if `run.sh` is killed mid-run (e.g., Ctrl-C during ramp), stress pods may remain. Delete them manually: `kubectl delete ns -l app=kb-stress` or use the individual namespace names (`kb-stress-1`, `kb-stress-2`, ...).
+- **Know your teardown.** The harness deletes stress namespaces automatically, but if the process is killed mid-run (e.g., Ctrl-C during ramp), stress pods may remain. Delete them manually: `kubectl delete ns -l app=kb-stress` or use the individual namespace names (`kb-stress-1`, `kb-stress-2`, ...).
 
 ## How it works
 
@@ -330,7 +335,7 @@ All templates set `imagePullPolicy: IfNotPresent`, so kubelet uses pre-loaded im
 
 ### Local dev clusters (Kind / k3d) -- no registry needed
 
-For Kind and k3d, `run.sh` automatically loads the bundled tar into the cluster at startup. No registry access is required. The smoke test (`scripts/kind-smoke.sh`) also pre-loads images before running.
+For Kind and k3d, the harness automatically loads the bundled tar into the cluster at startup. No registry access is required. The smoke test (`scripts/kind-smoke.sh`) also pre-loads images before running.
 
 ### Managed / remote clusters (EKS, GKE, AKS, on-prem)
 
@@ -361,7 +366,7 @@ kubectl config current-context
 kubectl get nodes -o wide
 
 # 2. Verify kube-burner is available (auto-downloaded on first run if missing)
-v0/bin/kube-burner version 2>/dev/null || echo "Will be installed automatically"
+kubepyrometer version
 ```
 
 Prerequisites:
@@ -388,11 +393,12 @@ kubectl get nodes -o wide
 # Verify these are the nodes you intend to stress-test
 ```
 
-### Step 2: Apply RBAC
+### Step 2: Apply RBAC (automatic)
 
-The harness needs a ServiceAccount and RBAC rules for probe pods. `run.sh` applies this automatically, but you can apply it ahead of time to verify permissions:
+The harness needs a ServiceAccount and RBAC rules for probe pods. `kubepyrometer run` applies these automatically at the start of every run, so no manual step is required. If you want to verify your permissions ahead of time (useful on locked-down clusters), apply the manifest manually:
 
 ```bash
+# From a repo checkout:
 kubectl apply -f v0/manifests/probe-rbac.yaml
 ```
 
@@ -505,9 +511,23 @@ The smoke test uses intentionally small parameter values (1 ramp step, 10s probe
 
 ## Configuration
 
-### `config.yaml`
+### Getting a config file
 
-Contains every tunable variable. Each key is uppercased and exported as an env var (e.g., `ramp_steps: 2` becomes `RAMP_STEPS=2`). Environment variables take precedence over the config file, so any key below can also be overridden at the command line (e.g., `RAMP_STEPS=5 kubepyrometer run`). In interactive mode (`-i` or `-c`), prompts override both. Run `kubepyrometer init` to generate a copy of this file in the current directory.
+Run `kubepyrometer init` to generate a `kubepyrometer.yaml` in the current directory. This is a copy of the built-in defaults with comments -- every setting the harness supports is listed. Edit it to match your cluster and testing goals, then run `kubepyrometer run` from the same directory. The harness picks it up automatically.
+
+To create a **global** config that applies to all runs (regardless of working directory), move or copy the file to `~/.kubepyrometer/config.yaml`:
+
+```bash
+mkdir -p ~/.kubepyrometer
+kubepyrometer init
+mv kubepyrometer.yaml ~/.kubepyrometer/config.yaml
+```
+
+A local `./kubepyrometer.yaml` takes precedence over the global config, and `-f` or `CONFIG_FILE` takes precedence over both. See [CLI commands](#cli-commands) for the full search order.
+
+### `config.yaml` reference
+
+Each key in the config file is uppercased and exported as an env var (e.g., `ramp_steps: 2` becomes `RAMP_STEPS=2`). Environment variables take precedence over the config file, so any key below can also be overridden at the command line (e.g., `RAMP_STEPS=5 kubepyrometer run`). In interactive mode (`-i` or `-c`), prompts override both.
 
 | Key | Default | Description |
 |-----|---------|-------------|
@@ -603,15 +623,15 @@ bash v0/scripts/build-kube-burner.sh
 
 ## Common gotchas
 
-**RBAC already applied automatically.** `run.sh` runs `kubectl apply -f manifests/probe-rbac.yaml` at the start of every run. You do not need to apply it manually, but doing so before the first run is a good way to verify you have the right permissions. If you see permission errors, check that your kubeconfig identity can create namespaces, serviceaccounts, clusterroles, clusterrolebindings, roles, and rolebindings.
+**RBAC already applied automatically.** The harness runs `kubectl apply` on the probe RBAC manifest at the start of every run. You do not need to apply it manually, but doing so before the first run is a good way to verify you have the right permissions. If you see permission errors, check that your kubeconfig identity can create namespaces, serviceaccounts, clusterroles, clusterrolebindings, roles, and rolebindings.
 
 **`/readyz` may be restricted.** Some managed Kubernetes services restrict access to the `/readyz` endpoint. If you see persistent `exit_code` failures for the `readyz` probe, set `PROBE_READYZ=0` to disable it. The `list-nodes` and `list-configmaps` probes will continue to measure control-plane latency.
 
-**kube-burner version must be 2.4.x.** The harness accepts any kube-burner 2.4.x patch release (e.g., v2.4.0, v2.4.1) and installs v2.4.0 by default. If you set `KB_BIN` to a binary that reports a different minor version, `run.sh` will refuse to start. Set `KB_ALLOW_ANY=1` to bypass the version check if you know what you are doing.
+**kube-burner version must be 2.4.x.** The harness accepts any kube-burner 2.4.x patch release (e.g., v2.4.0, v2.4.1) and installs v2.4.0 by default. If you set `KB_BIN` to a binary that reports a different minor version, the harness will refuse to start. Set `KB_ALLOW_ANY=1` to bypass the version check if you know what you are doing.
 
-**Templates are staged per run.** `run.sh` copies templates, workloads, and manifests into a staging directory (`$RUN_DIR/staging/`) before each run. The staged `ramp-step.yaml` is generated to include only the enabled contention modes, and any image rewrites are applied to the staged copies. This keeps every run fully isolated from source files and from other runs.
+**Templates are staged per run.** The harness copies templates, workloads, and manifests into a staging directory (`$RUN_DIR/staging/`) before each run. The staged `ramp-step.yaml` is generated to include only the enabled contention modes, and any image rewrites are applied to the staged copies. This keeps every run fully isolated from source files and from other runs.
 
-**Image pre-loading only works on local clusters.** The automatic `load-images.sh` step detects Kind (via `kind-*` kubectl context prefix) and k3d, and loads the bundled tar directly. For Docker Desktop Kubernetes, it falls back to `docker load` which shares images with the kubelet. For remote clusters (EKS, GKE, AKS), `docker load` does not make images available on cluster nodes -- use registry redirect (`-r` / `IMAGE_MAP_FILE`) or ensure nodes have pull access to Docker Hub.
+**Image pre-loading only works on local clusters.** The automatic image-loading step detects Kind (via `kind-*` kubectl context prefix) and k3d, and loads the bundled tar directly. For Docker Desktop Kubernetes, it falls back to `docker load` which shares images with the kubelet. For remote clusters (EKS, GKE, AKS), `docker load` does not make images available on cluster nodes -- use registry redirect (`-r` / `IMAGE_MAP_FILE`) or ensure nodes have pull access to Docker Hub.
 
 **Disk stress uses emptyDir.** The disk contention mode writes to an `emptyDir` volume, which is backed by the node's filesystem. No PVCs or StorageClasses are required. Write sizes are conservative by default (64 MB).
 
@@ -668,7 +688,7 @@ Formula/kubepyrometer.rb            # Homebrew formula
 .github/workflows/release.yml      # GitHub Actions release automation
 v0/
 ├── run.sh                          # Main harness entrypoint
-├── config.yaml                     # Default parameters (overridable via env)
+├── config.yaml                     # Built-in defaults (source for `kubepyrometer init`)
 ├── .gitignore                      # Ignores bin/, runs/, logs, collected-metrics/
 │
 ├── bin/                            # Auto-populated (gitignored)
@@ -762,7 +782,7 @@ Pulls `busybox:1.36.1` and `bitnami/kubectl:latest` via Docker, re-tags kubectl 
 
 ### `scripts/load-images.sh`
 
-Loads `v0/images/harness-images.tar` into the current cluster. Auto-detects Kind (via `kind-*` kubectl context prefix) and k3d. Falls back to `docker load`, which only helps when Docker Desktop is the Kubernetes runtime (Docker and kubelet share the image store). For remote clusters, this fallback is not useful -- use registry redirect instead. Called automatically by `run.sh` unless `-r`, `IMAGE_MAP_FILE`, or `SKIP_IMAGE_LOAD=1` is set.
+Loads `v0/images/harness-images.tar` into the current cluster. Auto-detects Kind (via `kind-*` kubectl context prefix) and k3d. Falls back to `docker load`, which only helps when Docker Desktop is the Kubernetes runtime (Docker and kubelet share the image store). For remote clusters, this fallback is not useful -- use registry redirect instead. Called automatically by `kubepyrometer run` unless `IMAGE_MAP_FILE` or `SKIP_IMAGE_LOAD=1` is set.
 
 ### `scripts/summarize.sh`
 

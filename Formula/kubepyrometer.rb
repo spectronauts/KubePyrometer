@@ -7,7 +7,7 @@ class Kubepyrometer < Formula
   desc "Kubernetes control-plane load-testing harness"
   homepage "https://github.com/spectronauts/KubePyrometer"
   url "https://github.com/spectronauts/KubePyrometer/releases/download/v0.3.0-preview/kubepyrometer-0.3.0-preview.tar.gz"
-  sha256 "8d0e575a4eac0b81ecfbe97a70143397cbbe65da665b1f4f7dc6ad9e14faad6a"
+  sha256 "e583def53d02bc799f479be088aa5fdb8aa0791d82bf8cd5fad26eb6d29ede93"
   license "Apache-2.0"
 
   depends_on "bash"

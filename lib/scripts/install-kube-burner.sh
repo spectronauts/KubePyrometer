@@ -20,11 +20,11 @@ case "$OS" in
   *)      echo "ERROR: unsupported OS: $OS"; exit 1 ;;
 esac
 
-ARCH="$(uname -m)"
-case "$ARCH" in
-  x86_64)        arch="amd64" ;;
+RAW_ARCH="$(uname -m)"
+case "$RAW_ARCH" in
+  x86_64)        arch="x86_64" ;;
   arm64|aarch64) arch="arm64" ;;
-  *)             echo "ERROR: unsupported arch: $ARCH"; exit 1 ;;
+  *)             echo "ERROR: unsupported arch: $RAW_ARCH"; exit 1 ;;
 esac
 
 echo ">>> Downloading kube-burner $KB_VERSION for ${os}/${arch}"

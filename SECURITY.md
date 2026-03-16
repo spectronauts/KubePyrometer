@@ -4,7 +4,8 @@
 
 | Version              | Supported          |
 |----------------------|--------------------|
-| v0.3.x (preview)     | Yes (pre-release)  |
+| v0.9.x (candidate)   | Yes (pre-release)  |
+| v0.3.x (preview)     | Yes                |
 | v0.2.x               | Yes                |
 | v0.1.x               | Yes                |
 

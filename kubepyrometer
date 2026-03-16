@@ -2,7 +2,7 @@
 set -uo pipefail
 
 # Resolve the data directory containing templates, scripts, workloads, etc.
-# Homebrew installs these under libexec/; repo checkout has them under v0/.
+# Homebrew installs these under libexec/; repo checkout has them under lib/.
 resolve_home() {
   if [ -n "${KUBEPYROMETER_HOME:-}" ]; then
     return 0
@@ -26,9 +26,9 @@ resolve_home() {
     return 0
   fi
 
-  # Repo checkout layout: kubepyrometer sits next to v0/
-  if [ -d "$self_dir/v0/scripts" ]; then
-    KUBEPYROMETER_HOME="$self_dir/v0"
+  # Repo checkout layout: kubepyrometer sits next to lib/
+  if [ -d "$self_dir/lib/scripts" ]; then
+    KUBEPYROMETER_HOME="$self_dir/lib"
     return 0
   fi
 

@@ -29,7 +29,7 @@ make install              # installs to /usr/local by default
 ```bash
 git clone https://github.com/spectronauts/KubePyrometer.git
 cd KubePyrometer
-./kubepyrometer run       # or: v0/run.sh (still works)
+./kubepyrometer run       # or: lib/run.sh (still works)
 ```
 
 After installing, run `kubepyrometer init` to generate a config file (`kubepyrometer.yaml`) in your current directory. This file contains every tunable parameter with its default value -- it is the easiest way to see what is configurable and to customize the tool for your cluster. The harness works without a config file (sensible defaults are built in), but having one makes it easy to adjust settings and reproduce runs.
@@ -54,7 +54,7 @@ cat "$(ls -dt runs/*/ | head -1)/probe-stats.csv"
 
 Step 2 creates a `kubepyrometer.yaml` in the current directory. You can skip it to run with defaults, but reviewing it first is recommended -- it documents every setting the harness uses. See [Configuration](#configuration) for the full reference.
 
-> **Direct invocation:** `v0/run.sh` still works from a repo checkout and behaves identically to previous versions.
+> **Direct invocation:** `lib/run.sh` still works from a repo checkout and behaves identically to previous versions.
 
 Example output (`summary.csv`):
 
@@ -118,7 +118,7 @@ kubepyrometer run -p large
 ### Recommendations
 
 - **Start small.** The defaults (1 replica, 50m CPU, 32 Mi memory, 2 ramp steps) are intentionally conservative.
-- **Test in non-production first.** Use a Kind cluster (`v0/scripts/kind-smoke.sh`) or a dedicated test cluster before running against shared infrastructure.
+- **Test in non-production first.** Use a Kind cluster (`lib/scripts/kind-smoke.sh`) or a dedicated test cluster before running against shared infrastructure.
 - **Monitor during runs.** Watch node conditions (`kubectl top nodes`) and API server latency from outside the harness.
 - **Know your teardown.** The harness deletes stress namespaces automatically, but if the process is killed mid-run (e.g., Ctrl-C during ramp), stress pods may remain. Delete them manually: `kubectl delete ns -l app=kb-stress` or use the individual namespace names (`kb-stress-1`, `kb-stress-2`, ...).
 
@@ -176,7 +176,7 @@ kubepyrometer version          # print version information
 
 `NONINTERACTIVE=1` is still supported for backward compatibility and overrides any flags.
 
-> **Direct invocation:** `v0/run.sh [-i] [-c] [-r] [-p PROFILE] [-f CONFIG] [-o OUTDIR]` still works from a repo checkout.
+> **Direct invocation:** `lib/run.sh [-i] [-c] [-r] [-p PROFILE] [-f CONFIG] [-o OUTDIR]` still works from a repo checkout.
 
 ### Interactive mode (`-i` or `-c`)
 
@@ -324,7 +324,7 @@ API stress uses kube-burner's native object creation engine to create ConfigMaps
 
 ## Images and registry access
 
-Both container images are bundled in the repo as `v0/images/harness-images.tar`:
+Both container images are bundled in the repo as `lib/images/harness-images.tar`:
 
 | Image | Used by | Size |
 |-------|---------|------|
@@ -353,7 +353,7 @@ To update the bundled images (e.g., after a kubectl version bump):
 
 ```bash
 # Requires Docker. Edit KUBECTL_TAG in the script if the upstream version changed.
-bash v0/scripts/save-images.sh
+bash lib/scripts/save-images.sh
 ```
 
 ## Preflight
@@ -399,7 +399,7 @@ The harness needs a ServiceAccount and RBAC rules for probe pods. `kubepyrometer
 
 ```bash
 # From a repo checkout:
-kubectl apply -f v0/manifests/probe-rbac.yaml
+kubectl apply -f lib/manifests/probe-rbac.yaml
 ```
 
 This creates:
@@ -438,7 +438,7 @@ kubepyrometer run -c
 With a custom config file:
 
 ```bash
-kubepyrometer run -f v0/configs/eks-small.yaml
+kubepyrometer run -f lib/configs/eks-small.yaml
 ```
 
 With environment variable overrides (highest precedence):
@@ -496,7 +496,7 @@ Use this workflow for local smoke testing. This is the only workflow that requir
 ### Run the smoke test
 
 ```bash
-v0/scripts/kind-smoke.sh
+lib/scripts/kind-smoke.sh
 ```
 
 This single command will:
@@ -618,7 +618,7 @@ KB_BIN=/path/to/custom-build KB_ALLOW_ANY=1 kubepyrometer run
 
 ```bash
 # Requires Go >= 1.23 and a local kube-burner source checkout
-bash v0/scripts/build-kube-burner.sh
+bash lib/scripts/build-kube-burner.sh
 ```
 
 ## Common gotchas
@@ -684,9 +684,8 @@ The bundle includes summaries, JSONL data, phase logs, cluster fingerprint, fail
 kubepyrometer                       # CLI entry point (subcommands: run, init, summarize, etc.)
 VERSION                             # Release version (e.g. 0.3.0-preview)
 Makefile                            # install / uninstall / dist targets
-Formula/kubepyrometer.rb            # Homebrew formula
 .github/workflows/release.yml      # GitHub Actions release automation
-v0/
+lib/
 ├── run.sh                          # Main harness entrypoint
 ├── config.yaml                     # Built-in defaults (source for `kubepyrometer init`)
 ├── .gitignore                      # Ignores bin/, runs/, logs, collected-metrics/
@@ -753,7 +752,7 @@ v0/
 
 ### `kubepyrometer` (CLI entry point)
 
-The top-level CLI wrapper. Resolves the data directory (`KUBEPYROMETER_HOME`), dispatches to subcommands (`run`, `init`, `summarize`, `monitor`, `bundle`, `version`), and handles config file search (see [CLI commands](#cli-commands)). When installed via Homebrew, data files live under `$(brew --prefix)/libexec/kubepyrometer/`; from a repo checkout, they're found under `v0/`.
+The top-level CLI wrapper. Resolves the data directory (`KUBEPYROMETER_HOME`), dispatches to subcommands (`run`, `init`, `summarize`, `monitor`, `bundle`, `version`), and handles config file search (see [CLI commands](#cli-commands)). When installed via Homebrew, data files live under `$(brew --prefix)/libexec/kubepyrometer/`; from a repo checkout, they're found under `lib/`.
 
 ### `run.sh`
 
@@ -762,7 +761,7 @@ The core harness engine (called by `kubepyrometer run`). Accepts `-i` (full inte
 **kube-burner resolution order:**
 1. `KB_BIN` env var (must be executable; version-checked against v2.4.0 unless `KB_ALLOW_ANY=1`)
 2. System `kube-burner` in `$PATH` (only if it reports v2.4.0)
-3. `~/.kubepyrometer/bin/kube-burner` (when installed via Homebrew) or `v0/bin/kube-burner` (repo checkout) -- auto-downloaded via `install-kube-burner.sh` if missing
+3. `~/.kubepyrometer/bin/kube-burner` (when installed via Homebrew) or `lib/bin/kube-burner` (repo checkout) -- auto-downloaded via `install-kube-burner.sh` if missing
 
 ### `scripts/kind-smoke.sh`
 
@@ -770,7 +769,7 @@ Self-contained smoke test for **local dry runs only**. Creates a Kind cluster (o
 
 ### `scripts/install-kube-burner.sh`
 
-Downloads kube-burner v2.4.0 from GitHub Releases for the current OS/arch (`darwin`/`linux` + `amd64`/`arm64`). Tries multiple known asset name patterns until one succeeds. After extracting, verifies the binary reports v2.4.0 and writes a stamp file to `v0/bin/.kb-version`.
+Downloads kube-burner v2.4.0 from GitHub Releases for the current OS/arch (`darwin`/`linux` + `amd64`/`arm64`). Tries multiple known asset name patterns until one succeeds. After extracting, verifies the binary reports v2.4.0 and writes a stamp file to `lib/bin/.kb-version`.
 
 ### `scripts/build-kube-burner.sh`
 
@@ -778,11 +777,11 @@ Downloads kube-burner v2.4.0 from GitHub Releases for the current OS/arch (`darw
 
 ### `scripts/save-images.sh`
 
-Pulls `busybox:1.36.1` and `bitnami/kubectl:latest` via Docker, re-tags kubectl to the pinned version (`1.35.2`), and saves both into `v0/images/harness-images.tar`. Run this to refresh the bundled images. The pinned version (`KUBECTL_TAG`) is defined at the top of the script and must match the image ref in `templates/probe-job.yaml`.
+Pulls `busybox:1.36.1` and `bitnami/kubectl:latest` via Docker, re-tags kubectl to the pinned version (`1.35.2`), and saves both into `lib/images/harness-images.tar`. Run this to refresh the bundled images. The pinned version (`KUBECTL_TAG`) is defined at the top of the script and must match the image ref in `templates/probe-job.yaml`.
 
 ### `scripts/load-images.sh`
 
-Loads `v0/images/harness-images.tar` into the current cluster. Auto-detects Kind (via `kind-*` kubectl context prefix) and k3d. Falls back to `docker load`, which only helps when Docker Desktop is the Kubernetes runtime (Docker and kubelet share the image store). For remote clusters, this fallback is not useful -- use registry redirect instead. Called automatically by `kubepyrometer run` unless `IMAGE_MAP_FILE` or `SKIP_IMAGE_LOAD=1` is set.
+Loads `lib/images/harness-images.tar` into the current cluster. Auto-detects Kind (via `kind-*` kubectl context prefix) and k3d. Falls back to `docker load`, which only helps when Docker Desktop is the Kubernetes runtime (Docker and kubelet share the image store). For remote clusters, this fallback is not useful -- use registry redirect instead. Called automatically by `kubepyrometer run` unless `IMAGE_MAP_FILE` or `SKIP_IMAGE_LOAD=1` is set.
 
 ### `scripts/summarize.sh`
 
@@ -794,7 +793,7 @@ Lightweight cluster resource monitor. Periodically captures `kubectl top nodes`,
 
 ### `scripts/bundle-run.sh`
 
-Packages a run directory's artifacts into a shareable `.tar.gz` support bundle. Includes summaries, JSONL data, phase logs, cluster fingerprint, failure logs, and configuration snapshots. Excludes the `staging/` directory and cluster credentials. Usage: `bash v0/scripts/bundle-run.sh v0/runs/YYYYMMDD-HHMMSS`.
+Packages a run directory's artifacts into a shareable `.tar.gz` support bundle. Includes summaries, JSONL data, phase logs, cluster fingerprint, failure logs, and configuration snapshots. Excludes the `staging/` directory and cluster credentials. Usage: `bash lib/scripts/bundle-run.sh runs/YYYYMMDD-HHMMSS`.
 
 ### `scripts/v0tui.sh`
 

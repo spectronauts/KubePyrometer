@@ -14,12 +14,12 @@ install:
 	install -d $(PREFIX)/bin
 	install -m 755 kubepyrometer $(PREFIX)/bin/kubepyrometer
 	install -d $(LIBEXEC)
-	install -m 755 v0/run.sh $(LIBEXEC)/run.sh
-	install -m 644 v0/config.yaml $(LIBEXEC)/config.yaml
+	install -m 755 lib/run.sh $(LIBEXEC)/run.sh
+	install -m 644 lib/config.yaml $(LIBEXEC)/config.yaml
 	cp VERSION $(LIBEXEC)/VERSION
 	@for dir in $(DATA_DIRS); do \
-		if [ -d "v0/$$dir" ]; then \
-			cp -R "v0/$$dir" "$(LIBEXEC)/"; \
+		if [ -d "lib/$$dir" ]; then \
+			cp -R "lib/$$dir" "$(LIBEXEC)/"; \
 		fi; \
 	done
 	chmod +x $(LIBEXEC)/scripts/*.sh
@@ -32,8 +32,8 @@ dist:
 	@echo "Building $(TAR_NAME).tar.gz"
 	$(eval TMPDIR := $(shell mktemp -d))
 	mkdir -p $(TMPDIR)/$(TAR_NAME)
-	cp -R kubepyrometer VERSION LICENSE NOTICE README.md v0 $(TMPDIR)/$(TAR_NAME)/
-	rm -rf $(TMPDIR)/$(TAR_NAME)/v0/bin $(TMPDIR)/$(TAR_NAME)/v0/runs
+	cp -R kubepyrometer VERSION LICENSE NOTICE README.md lib $(TMPDIR)/$(TAR_NAME)/
+	rm -rf $(TMPDIR)/$(TAR_NAME)/lib/bin $(TMPDIR)/$(TAR_NAME)/lib/runs
 	tar -czf $(TAR_NAME).tar.gz -C $(TMPDIR) $(TAR_NAME)
 	shasum -a 256 $(TAR_NAME).tar.gz > $(TAR_NAME).tar.gz.sha256
 	rm -rf $(TMPDIR)

@@ -5,7 +5,7 @@
 # release binary via install-kube-burner.sh instead.
 #
 # To force a source build:
-#   KB_BUILD_FROM_SOURCE=1 bash v0/scripts/build-kube-burner.sh
+#   KB_BUILD_FROM_SOURCE=1 bash lib/scripts/build-kube-burner.sh
 # --------------------------------------------------------------------------
 set -euo pipefail
 

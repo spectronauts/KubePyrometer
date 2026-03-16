@@ -13,7 +13,7 @@
 #           apt install fzf jq  OR  dnf install fzf jq
 #
 # Usage:
-#   v0/scripts/v0tui.sh
+#   lib/scripts/v0tui.sh
 # ============================================================================
 set -uo pipefail
 
@@ -133,8 +133,8 @@ action_run_harness() {
 
   local config_choice
   config_choice=$(gum choose --header "Config source" \
-    "default (v0/config.yaml)" \
-    "pick from v0/configs/" \
+    "default (lib/config.yaml)" \
+    "pick from lib/configs/" \
     "cancel")
 
   local config_file=""
@@ -159,7 +159,7 @@ action_run_harness() {
     env_overrides=$(gum write --placeholder "RAMP_STEPS=3\nRAMP_CPU_MILLICORES=200" 2>/dev/null || true)
   fi
 
-  if ! gum confirm "Run v0/run.sh with this config?" 2>/dev/null; then
+  if ! gum confirm "Run lib/run.sh with this config?" 2>/dev/null; then
     return
   fi
 
@@ -288,7 +288,7 @@ action_show_results() {
   local choice
   choice=$(gum choose --header "Which run?" \
     "latest" \
-    "pick from v0/runs/" \
+    "pick from lib/runs/" \
     "cancel")
 
   local run_dir=""
@@ -296,7 +296,7 @@ action_show_results() {
     latest)
       run_dir=$(latest_run_dir)
       if [ -z "$run_dir" ]; then
-        echo "No runs found under v0/runs/"
+        echo "No runs found under lib/runs/"
         press_enter
         return
       fi
@@ -334,8 +334,8 @@ action_edit_config() {
 
   local choice
   choice=$(gum choose --header "Which file?" \
-    "v0/config.yaml (defaults)" \
-    "pick from v0/configs/" \
+    "lib/config.yaml (defaults)" \
+    "pick from lib/configs/" \
     "cancel")
 
   local target=""
@@ -361,7 +361,7 @@ action_edit_config() {
 action_kind_smoke() {
   heading "Kind Smoke Test"
 
-  if ! gum confirm "Run v0/scripts/kind-smoke.sh?" 2>/dev/null; then
+  if ! gum confirm "Run lib/scripts/kind-smoke.sh?" 2>/dev/null; then
     return
   fi
 

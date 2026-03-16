@@ -1,0 +1,90 @@
+global:
+  gc: false
+jobs:
+  - name: "ramp-step-{{.STEP}}"
+    jobType: create
+    jobIterations: 1
+    namespace: "kb-stress-{{.STEP}}"
+    namespacedIterations: false
+    cleanup: false
+    waitWhenFinished: true
+    maxWaitTimeout: 5m
+    qps: {{.RAMP_QPS}}
+    burst: {{.RAMP_BURST}}
+    preLoadImages: false
+    verifyObjects: true
+    errorOnVerify: false
+    objects:
+      - objectTemplate: templates/cpu-stress.yaml
+        replicas: 1
+        inputVars:
+          step: "{{.STEP}}"
+          millicores: "{{.CPU_MILLICORES}}"
+          podReplicas: "{{.CPU_REPLICAS}}"
+      - objectTemplate: templates/mem-stress.yaml
+        replicas: 1
+        inputVars:
+          step: "{{.STEP}}"
+          memMb: "{{.MEM_MB}}"
+          podReplicas: "{{.MEM_REPLICAS}}"
+      - objectTemplate: templates/disk-stress.yaml
+        replicas: 1
+        inputVars:
+          step: "{{.STEP}}"
+          diskMb: "{{.DISK_MB}}"
+          podReplicas: "{{.DISK_REPLICAS}}"
+      - objectTemplate: templates/net-echo-service.yaml
+        replicas: 1
+        inputVars:
+          step: "{{.STEP}}"
+      - objectTemplate: templates/net-echo-server.yaml
+        replicas: 1
+        inputVars:
+          step: "{{.STEP}}"
+      - objectTemplate: templates/net-stress.yaml
+        replicas: 1
+        inputVars:
+          step: "{{.STEP}}"
+          netInterval: "{{.NET_INTERVAL}}"
+          podReplicas: "{{.NET_REPLICAS}}"
+  - name: "api-stress-step-{{.STEP}}"
+    jobType: create
+    jobIterations: {{.API_ITERATIONS}}
+    namespace: "kb-stress-{{.STEP}}"
+    namespacedIterations: false
+    cleanup: false
+    waitWhenFinished: false
+    qps: {{.API_QPS}}
+    burst: {{.API_BURST}}
+    preLoadImages: false
+    verifyObjects: false
+    errorOnVerify: false
+    objects:
+      - objectTemplate: templates/api-stress-configmap.yaml
+        replicas: {{.API_REPLICAS}}
+        inputVars:
+          step: "{{.STEP}}"
+      - objectTemplate: templates/api-stress-secret.yaml
+        replicas: {{.API_REPLICAS}}
+        inputVars:
+          step: "{{.STEP}}"
+  - name: "probe-ramp-step-{{.STEP}}"
+    jobType: create
+    jobIterations: 1
+    namespacedIterations: false
+    cleanup: true
+    waitWhenFinished: true
+    maxWaitTimeout: 3m
+    qps: {{.RAMP_QPS}}
+    burst: {{.RAMP_BURST}}
+    preLoadImages: false
+    verifyObjects: true
+    errorOnVerify: false
+    objects:
+      - objectTemplate: templates/probe-job.yaml
+        replicas: 1
+        inputVars:
+          phase: "ramp-step-{{.STEP}}"
+          duration: "{{.RAMP_PROBE_DURATION}}"
+          interval: "{{.RAMP_PROBE_INTERVAL}}"
+          probeReadyz: "{{.PROBE_READYZ}}"

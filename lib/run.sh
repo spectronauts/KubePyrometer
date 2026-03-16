@@ -1,0 +1,1120 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+ORIG_CWD="$(pwd)"
+
+if [ -n "${KUBEPYROMETER_HOME:-}" ]; then
+  V0_DIR="$KUBEPYROMETER_HOME"
+else
+  V0_DIR="$(cd "$(dirname "$0")" && pwd)"
+fi
+CONFIG_FILE="${CONFIG_FILE:-$V0_DIR/config.yaml}"
+
+KB_REQUIRED_VERSION="v2.4.0"
+KB_REQUIRED_MINOR="2.4."
+
+resolve_kb() {
+  # 1) Explicit override
+  if [ -n "${KB_BIN:-}" ] && [ -x "$KB_BIN" ]; then
+    if [ "${KB_ALLOW_ANY:-0}" != "1" ]; then
+      if ! "$KB_BIN" version 2>&1 | grep -q "${KB_REQUIRED_MINOR}"; then
+        echo "ERROR: KB_BIN ($KB_BIN) does not report kube-burner 2.4.x:"
+        "$KB_BIN" version 2>&1 | head -5
+        echo "Set KB_ALLOW_ANY=1 to accept any version, or point KB_BIN to a 2.4.x binary."
+        exit 1
+      fi
+    fi
+    echo ">>> Using KB_BIN from environment: $KB_BIN"
+    KB="$KB_BIN"
+    return 0
+  fi
+
+  # 2) System kube-burner matching required minor version
+  if command -v kube-burner &>/dev/null; then
+    if kube-burner version 2>&1 | grep -q "${KB_REQUIRED_MINOR}"; then
+      KB="$(command -v kube-burner)"
+      echo ">>> Using system kube-burner (2.4.x): $KB"
+      return 0
+    fi
+  fi
+
+  # 3) Local binary, install if missing
+  if [ -n "${KUBEPYROMETER_HOME:-}" ]; then
+    KB_CACHE_DIR="${HOME}/.kubepyrometer/bin"
+  else
+    KB_CACHE_DIR="$V0_DIR/bin"
+  fi
+  KB="$KB_CACHE_DIR/kube-burner"
+  if [ ! -x "$KB" ]; then
+    echo ">>> kube-burner not found — installing $KB_REQUIRED_VERSION"
+    KB_OUTPUT="$KB" bash "$V0_DIR/scripts/install-kube-burner.sh"
+  fi
+
+  if [ ! -x "$KB" ]; then
+    echo "ERROR: kube-burner binary not available at $KB"
+    echo "Set KB_BIN to a local kube-burner path and re-run."
+    exit 1
+  fi
+  echo ">>> Using local kube-burner: $KB"
+}
+
+resolve_kb
+cd "$V0_DIR"
+
+# ---------------------------------------------------------------------------
+# Parse flat config.yaml into uppercased env vars (only if not already set)
+# ---------------------------------------------------------------------------
+parse_config() {
+  local file="$1"
+  [ -f "$file" ] || return 0
+  while IFS='' read -r line; do
+    line="${line%%#*}"                       # strip comments
+    [[ -z "$line" || ! "$line" =~ : ]] && continue
+    key="${line%%:*}"; key="${key// /}"
+    val="${line#*:}";  val="${val# }"; val="${val% }"
+    val="${val#\"}"; val="${val%\"}"
+    val="${val#\'}"; val="${val%\'}"
+    key=$(echo "$key" | tr '[:lower:]' '[:upper:]')
+    # only set if not already exported
+    if [ -z "${!key+x}" ]; then
+      export "$key=$val"
+    fi
+  done < "$file"
+}
+
+# ---------------------------------------------------------------------------
+# CLI flags (-i interactive, -c config prompts, -r registry prompts)
+# Must be parsed before config/profile loading so -p takes effect.
+# ---------------------------------------------------------------------------
+PROMPT_MODES=false
+PROMPT_REGISTRY=false
+
+while getopts "icrp:f:o:h" opt; do
+  case "$opt" in
+    i) PROMPT_MODES=true; PROMPT_REGISTRY=true ;;
+    c) PROMPT_MODES=true ;;
+    r) PROMPT_REGISTRY=true ;;
+    p) export CONFIG_PROFILE="$OPTARG" ;;
+    f) export CONFIG_FILE="$OPTARG" ;;
+    o) export RUN_DIR="$OPTARG" ;;
+    h) echo "Usage: run.sh [-i] [-c] [-r] [-p PROFILE] [-f CONFIG] [-o OUTDIR]"
+       echo "  -i          Interactive (prompt for everything)"
+       echo "  -c          Prompt for contention mode selection/settings"
+       echo "  -r          Prompt for image registry redirect and pull secret"
+       echo "  -p PROFILE  Load a config profile (e.g., 'large')"
+       echo "  -f CONFIG   Path to config file"
+       echo "  -o OUTDIR   Output directory for run artifacts"
+       echo "  Default: non-interactive, uses config.yaml / env var defaults"
+       exit 0 ;;
+    *) echo "Usage: run.sh [-i] [-c] [-r] [-p PROFILE] [-f CONFIG] [-o OUTDIR] [-h]" >&2; exit 1 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+# Backward compat: NONINTERACTIVE=1 forces non-interactive regardless of flags
+if [ "${NONINTERACTIVE:-0}" = "1" ]; then
+  PROMPT_MODES=false
+  PROMPT_REGISTRY=false
+fi
+
+# ---------------------------------------------------------------------------
+# Config profiles (loaded before config.yaml so profile values take precedence
+# over generic defaults, but env vars still override everything)
+# Precedence: env vars > profile > config.yaml > built-in defaults
+# ---------------------------------------------------------------------------
+if [ -n "${CONFIG_PROFILE:-}" ]; then
+  PROFILE_FILE="$V0_DIR/configs/profile-${CONFIG_PROFILE}.yaml"
+  if [ -f "$PROFILE_FILE" ]; then
+    echo ">>> Loading profile: $CONFIG_PROFILE ($PROFILE_FILE)"
+    parse_config "$PROFILE_FILE"
+  else
+    echo "ERROR: unknown profile '$CONFIG_PROFILE' (no $PROFILE_FILE)"
+    exit 1
+  fi
+fi
+
+parse_config "$CONFIG_FILE"
+
+# If the user supplied a custom config, also load built-in defaults for any
+# parameters they didn't override (parse_config only sets unset variables).
+BUILTIN_CONFIG="$V0_DIR/config.yaml"
+if [ -f "$BUILTIN_CONFIG" ] && [ "$(cd "$(dirname "$CONFIG_FILE")" && pwd)/$(basename "$CONFIG_FILE")" != "$(cd "$(dirname "$BUILTIN_CONFIG")" && pwd)/$(basename "$BUILTIN_CONFIG")" ] 2>/dev/null; then
+  parse_config "$BUILTIN_CONFIG"
+fi
+
+# ---------------------------------------------------------------------------
+# Defaults (overridable by config.yaml or environment)
+# ---------------------------------------------------------------------------
+BASELINE_PROBE_DURATION="${BASELINE_PROBE_DURATION:-10}"
+BASELINE_PROBE_INTERVAL="${BASELINE_PROBE_INTERVAL:-2}"
+RAMP_STEPS="${RAMP_STEPS:-2}"
+RAMP_CPU_REPLICAS="${RAMP_CPU_REPLICAS:-1}"
+RAMP_CPU_MILLICORES="${RAMP_CPU_MILLICORES:-50}"
+RAMP_MEM_REPLICAS="${RAMP_MEM_REPLICAS:-1}"
+RAMP_MEM_MB="${RAMP_MEM_MB:-32}"
+RECOVERY_PROBE_DURATION="${RECOVERY_PROBE_DURATION:-10}"
+RECOVERY_PROBE_INTERVAL="${RECOVERY_PROBE_INTERVAL:-2}"
+RAMP_PROBE_DURATION="${RAMP_PROBE_DURATION:-10}"
+RAMP_PROBE_INTERVAL="${RAMP_PROBE_INTERVAL:-2}"
+KB_TIMEOUT="${KB_TIMEOUT:-5m}"
+SKIP_LOG_FILE="${SKIP_LOG_FILE:-true}"
+PROBE_READYZ="${PROBE_READYZ:-1}"
+RAMP_QPS="${RAMP_QPS:-50}"
+RAMP_BURST="${RAMP_BURST:-100}"
+
+# ---------------------------------------------------------------------------
+# Contention mode defaults
+# ---------------------------------------------------------------------------
+MODE_CPU="${MODE_CPU:-on}"
+MODE_MEM="${MODE_MEM:-on}"
+MODE_DISK="${MODE_DISK:-off}"
+MODE_NETWORK="${MODE_NETWORK:-off}"
+MODE_API="${MODE_API:-off}"
+RAMP_DISK_REPLICAS="${RAMP_DISK_REPLICAS:-1}"
+RAMP_DISK_MB="${RAMP_DISK_MB:-64}"
+RAMP_NET_REPLICAS="${RAMP_NET_REPLICAS:-1}"
+RAMP_NET_INTERVAL="${RAMP_NET_INTERVAL:-0.5}"
+RAMP_API_QPS="${RAMP_API_QPS:-20}"
+RAMP_API_BURST="${RAMP_API_BURST:-40}"
+RAMP_API_ITERATIONS="${RAMP_API_ITERATIONS:-50}"
+RAMP_API_REPLICAS="${RAMP_API_REPLICAS:-5}"
+CLUSTER_MONITOR="${CLUSTER_MONITOR:-0}"
+MONITOR_INTERVAL="${MONITOR_INTERVAL:-10}"
+
+# ---------------------------------------------------------------------------
+# Safety limits
+# ---------------------------------------------------------------------------
+SAFETY_MAX_PODS="${SAFETY_MAX_PODS:-2000}"
+SAFETY_MAX_NAMESPACES="${SAFETY_MAX_NAMESPACES:-100}"
+SAFETY_MAX_OBJECTS_PER_STEP="${SAFETY_MAX_OBJECTS_PER_STEP:-5000}"
+SAFETY_BYPASS="${SAFETY_BYPASS:-0}"
+
+# ---------------------------------------------------------------------------
+# Interactive helpers
+# ---------------------------------------------------------------------------
+prompt_yn() {
+  local prompt="$1" default="${2:-y}" answer=""
+  printf '%s ' "$prompt" >/dev/tty 2>/dev/null || true
+  read -r answer </dev/tty 2>/dev/null || answer=""
+  case "${answer:-$default}" in
+    [nN]|[nN][oO]) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+prompt_value() {
+  local prompt="$1" default="$2" answer=""
+  printf '%s [%s]: ' "$prompt" "$default" >/dev/tty 2>/dev/null || true
+  read -r answer </dev/tty 2>/dev/null || answer=""
+  echo "${answer:-$default}"
+}
+
+# ---------------------------------------------------------------------------
+# Contention mode selection (interactive or non-interactive defaults)
+# ---------------------------------------------------------------------------
+setup_contention_modes() {
+  if [ "$PROMPT_MODES" = "true" ]; then
+    echo ""
+    echo ">>> Contention mode selection"
+
+    if prompt_yn "Enable cpu contention? [Y/n]"; then
+      MODE_CPU="on"
+      if prompt_yn "Edit cpu settings for this run? [Y/n]"; then
+        RAMP_CPU_REPLICAS="$(prompt_value '  CPU replicas per step' "$RAMP_CPU_REPLICAS")"
+        RAMP_CPU_MILLICORES="$(prompt_value '  CPU millicores per pod' "$RAMP_CPU_MILLICORES")"
+      fi
+    else
+      MODE_CPU="off"
+    fi
+
+    if prompt_yn "Enable mem contention? [Y/n]"; then
+      MODE_MEM="on"
+      if prompt_yn "Edit mem settings for this run? [Y/n]"; then
+        RAMP_MEM_REPLICAS="$(prompt_value '  MEM replicas per step' "$RAMP_MEM_REPLICAS")"
+        RAMP_MEM_MB="$(prompt_value '  MEM MB per pod' "$RAMP_MEM_MB")"
+      fi
+    else
+      MODE_MEM="off"
+    fi
+
+    if prompt_yn "Enable disk contention? [Y/n]"; then
+      MODE_DISK="on"
+      if prompt_yn "Edit disk settings for this run? [Y/n]"; then
+        RAMP_DISK_REPLICAS="$(prompt_value '  DISK replicas per step' "$RAMP_DISK_REPLICAS")"
+        RAMP_DISK_MB="$(prompt_value '  DISK MB to write per pod' "$RAMP_DISK_MB")"
+      fi
+    else
+      MODE_DISK="off"
+    fi
+
+    if prompt_yn "Enable network contention? [Y/n]"; then
+      MODE_NETWORK="on"
+      if prompt_yn "Edit network settings for this run? [Y/n]"; then
+        RAMP_NET_REPLICAS="$(prompt_value '  NET replicas per step' "$RAMP_NET_REPLICAS")"
+        RAMP_NET_INTERVAL="$(prompt_value '  NET request interval (seconds)' "$RAMP_NET_INTERVAL")"
+      fi
+    else
+      MODE_NETWORK="off"
+    fi
+
+    if prompt_yn "Enable API stress? [Y/n]"; then
+      MODE_API="on"
+      if prompt_yn "Edit API stress settings for this run? [Y/n]"; then
+        RAMP_API_QPS="$(prompt_value '  API QPS (queries per second)' "$RAMP_API_QPS")"
+        RAMP_API_BURST="$(prompt_value '  API burst' "$RAMP_API_BURST")"
+        RAMP_API_ITERATIONS="$(prompt_value '  API iterations (objects per step)' "$RAMP_API_ITERATIONS")"
+        RAMP_API_REPLICAS="$(prompt_value '  API replicas per iteration' "$RAMP_API_REPLICAS")"
+      fi
+    else
+      MODE_API="off"
+    fi
+
+    echo ""
+    if prompt_yn "Enable cluster monitor (kubectl top)? [Y/n]"; then
+      CLUSTER_MONITOR=1
+      MONITOR_INTERVAL="$(prompt_value '  Monitor interval (seconds)' "$MONITOR_INTERVAL")"
+    else
+      CLUSTER_MONITOR=0
+    fi
+  fi
+
+  # --- Persist configuration ---
+  cat > "$RUN_DIR/modes.env" <<EOF
+MODE_CPU=$MODE_CPU
+MODE_MEM=$MODE_MEM
+MODE_DISK=$MODE_DISK
+MODE_NETWORK=$MODE_NETWORK
+MODE_API=$MODE_API
+RAMP_CPU_REPLICAS=$RAMP_CPU_REPLICAS
+RAMP_CPU_MILLICORES=$RAMP_CPU_MILLICORES
+RAMP_MEM_REPLICAS=$RAMP_MEM_REPLICAS
+RAMP_MEM_MB=$RAMP_MEM_MB
+RAMP_DISK_REPLICAS=$RAMP_DISK_REPLICAS
+RAMP_DISK_MB=$RAMP_DISK_MB
+RAMP_NET_REPLICAS=$RAMP_NET_REPLICAS
+RAMP_NET_INTERVAL=$RAMP_NET_INTERVAL
+RAMP_API_QPS=$RAMP_API_QPS
+RAMP_API_BURST=$RAMP_API_BURST
+RAMP_API_ITERATIONS=$RAMP_API_ITERATIONS
+RAMP_API_REPLICAS=$RAMP_API_REPLICAS
+CLUSTER_MONITOR=$CLUSTER_MONITOR
+MONITOR_INTERVAL=$MONITOR_INTERVAL
+EOF
+
+  local cpu_en mem_en disk_en net_en api_en
+  [ "$MODE_CPU" = "on" ] && cpu_en=true || cpu_en=false
+  [ "$MODE_MEM" = "on" ] && mem_en=true || mem_en=false
+  [ "$MODE_DISK" = "on" ] && disk_en=true || disk_en=false
+  [ "$MODE_NETWORK" = "on" ] && net_en=true || net_en=false
+  [ "$MODE_API" = "on" ] && api_en=true || api_en=false
+
+  cat > "$RUN_DIR/modes.json" <<EOF
+{
+  "modes": {
+    "cpu":     {"enabled": $cpu_en, "replicas": $RAMP_CPU_REPLICAS, "millicores": $RAMP_CPU_MILLICORES},
+    "mem":     {"enabled": $mem_en, "replicas": $RAMP_MEM_REPLICAS, "memMb": $RAMP_MEM_MB},
+    "disk":    {"enabled": $disk_en, "replicas": $RAMP_DISK_REPLICAS, "diskMb": $RAMP_DISK_MB},
+    "network": {"enabled": $net_en, "replicas": $RAMP_NET_REPLICAS, "intervalSec": "$RAMP_NET_INTERVAL"},
+    "api":     {"enabled": $api_en, "qps": $RAMP_API_QPS, "burst": $RAMP_API_BURST, "iterations": $RAMP_API_ITERATIONS, "replicas": $RAMP_API_REPLICAS}
+  },
+  "monitor": {"enabled": $([ "$CLUSTER_MONITOR" = "1" ] && echo true || echo false), "intervalSec": $MONITOR_INTERVAL}
+}
+EOF
+
+  echo ""
+  echo ">>> Contention modes:"
+  printf "    cpu     = %-3s  (replicas=%s, millicores=%s)\n" "$MODE_CPU" "$RAMP_CPU_REPLICAS" "$RAMP_CPU_MILLICORES"
+  printf "    mem     = %-3s  (replicas=%s, mb=%s)\n" "$MODE_MEM" "$RAMP_MEM_REPLICAS" "$RAMP_MEM_MB"
+  printf "    disk    = %-3s  (replicas=%s, mb=%s)\n" "$MODE_DISK" "$RAMP_DISK_REPLICAS" "$RAMP_DISK_MB"
+  printf "    network = %-3s  (replicas=%s, interval=%ss)\n" "$MODE_NETWORK" "$RAMP_NET_REPLICAS" "$RAMP_NET_INTERVAL"
+  printf "    api     = %-3s  (qps=%s, burst=%s, iterations=%s, replicas=%s)\n" "$MODE_API" "$RAMP_API_QPS" "$RAMP_API_BURST" "$RAMP_API_ITERATIONS" "$RAMP_API_REPLICAS"
+  if [ "$CLUSTER_MONITOR" = "1" ]; then
+    printf "    monitor = on   (interval=%ss)\n" "$MONITOR_INTERVAL"
+  else
+    printf "    monitor = off\n"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Staging: copy templates/workloads for this run
+# ---------------------------------------------------------------------------
+ensure_staging() {
+  local staging="$RUN_DIR/staging"
+  if [ ! -d "$staging/templates" ]; then
+    mkdir -p "$staging"
+    cp -r "$V0_DIR/templates" "$staging/"
+    cp -r "$V0_DIR/workloads" "$staging/"
+    cp -r "$V0_DIR/manifests" "$staging/"
+  fi
+  WORK_DIR="$staging"
+  echo ">>> Staging directory: $WORK_DIR"
+}
+
+# ---------------------------------------------------------------------------
+# Generate ramp-step.yaml with only enabled contention modes
+# ---------------------------------------------------------------------------
+generate_ramp_step() {
+  local out="$WORK_DIR/workloads/ramp-step.yaml"
+  local has_stress=false
+  [[ "$MODE_CPU" = "on" || "$MODE_MEM" = "on" || "$MODE_DISK" = "on" || "$MODE_NETWORK" = "on" || "$MODE_API" = "on" ]] && has_stress=true
+
+  cat > "$out" <<'YAML'
+global:
+  gc: false
+jobs:
+YAML
+
+  if [ "$has_stress" = "true" ]; then
+    cat >> "$out" <<'YAML'
+  - name: "ramp-step-{{.STEP}}"
+    jobType: create
+    jobIterations: 1
+    namespace: "kb-stress-{{.STEP}}"
+    namespacedIterations: false
+    cleanup: false
+    waitWhenFinished: true
+    maxWaitTimeout: 5m
+    qps: {{.RAMP_QPS}}
+    burst: {{.RAMP_BURST}}
+    preLoadImages: false
+    verifyObjects: true
+    errorOnVerify: false
+    objects:
+YAML
+
+    [ "$MODE_CPU" = "on" ] && cat >> "$out" <<'YAML'
+      - objectTemplate: templates/cpu-stress.yaml
+        replicas: 1
+        inputVars:
+          step: "{{.STEP}}"
+          millicores: "{{.CPU_MILLICORES}}"
+          podReplicas: "{{.CPU_REPLICAS}}"
+YAML
+
+    [ "$MODE_MEM" = "on" ] && cat >> "$out" <<'YAML'
+      - objectTemplate: templates/mem-stress.yaml
+        replicas: 1
+        inputVars:
+          step: "{{.STEP}}"
+          memMb: "{{.MEM_MB}}"
+          podReplicas: "{{.MEM_REPLICAS}}"
+YAML
+
+    [ "$MODE_DISK" = "on" ] && cat >> "$out" <<'YAML'
+      - objectTemplate: templates/disk-stress.yaml
+        replicas: 1
+        inputVars:
+          step: "{{.STEP}}"
+          diskMb: "{{.DISK_MB}}"
+          podReplicas: "{{.DISK_REPLICAS}}"
+YAML
+
+    [ "$MODE_NETWORK" = "on" ] && cat >> "$out" <<'YAML'
+      - objectTemplate: templates/net-echo-service.yaml
+        replicas: 1
+        inputVars:
+          step: "{{.STEP}}"
+      - objectTemplate: templates/net-echo-server.yaml
+        replicas: 1
+        inputVars:
+          step: "{{.STEP}}"
+      - objectTemplate: templates/net-stress.yaml
+        replicas: 1
+        inputVars:
+          step: "{{.STEP}}"
+          netInterval: "{{.NET_INTERVAL}}"
+          podReplicas: "{{.NET_REPLICAS}}"
+YAML
+  fi
+
+  if [ "$MODE_API" = "on" ]; then
+    cat >> "$out" <<'YAML'
+  - name: "api-stress-step-{{.STEP}}"
+    jobType: create
+    jobIterations: {{.API_ITERATIONS}}
+    namespace: "kb-stress-{{.STEP}}"
+    namespacedIterations: false
+    cleanup: false
+    waitWhenFinished: false
+    qps: {{.API_QPS}}
+    burst: {{.API_BURST}}
+    preLoadImages: false
+    verifyObjects: false
+    errorOnVerify: false
+    objects:
+      - objectTemplate: templates/api-stress-configmap.yaml
+        replicas: {{.API_REPLICAS}}
+        inputVars:
+          step: "{{.STEP}}"
+      - objectTemplate: templates/api-stress-secret.yaml
+        replicas: {{.API_REPLICAS}}
+        inputVars:
+          step: "{{.STEP}}"
+YAML
+  fi
+
+  cat >> "$out" <<'YAML'
+  - name: "probe-ramp-step-{{.STEP}}"
+    jobType: create
+    jobIterations: 1
+    namespacedIterations: false
+    cleanup: true
+    waitWhenFinished: true
+    maxWaitTimeout: 5m
+    qps: {{.RAMP_QPS}}
+    burst: {{.RAMP_BURST}}
+    preLoadImages: false
+    verifyObjects: true
+    errorOnVerify: false
+    objects:
+      - objectTemplate: templates/probe-job.yaml
+        replicas: 1
+        inputVars:
+          phase: "ramp-step-{{.STEP}}"
+          duration: "{{.RAMP_PROBE_DURATION}}"
+          interval: "{{.RAMP_PROBE_INTERVAL}}"
+          probeReadyz: "{{.PROBE_READYZ}}"
+YAML
+}
+
+# ---------------------------------------------------------------------------
+# Image registry redirect (split: collect decisions, then apply to staging)
+# ---------------------------------------------------------------------------
+WORK_DIR="$V0_DIR"
+IMAGE_MAP_ORIG=()
+IMAGE_MAP_REPL=()
+IMAGE_PULL_SECRET="${IMAGE_PULL_SECRET:-}"
+
+collect_image_redirects() {
+  local img_list=()
+  local seen=""
+
+  while IFS= read -r line; do
+    local img
+    img=$(echo "$line" | sed 's/^[[:space:]]*image:[[:space:]]*//' | sed "s/^[\"']//;s/[\"']$//" | sed 's/[[:space:]]*$//')
+    [[ -z "$img" ]] && continue
+    case "$seen" in *"|${img}|"*) continue ;; esac
+    seen="${seen}|${img}|"
+    img_list+=("$img")
+  done < <(grep -h 'image:' "$V0_DIR"/templates/*.yaml "$V0_DIR"/manifests/*.yaml 2>/dev/null || true)
+
+  if [ ${#img_list[@]} -eq 0 ]; then
+    return 0
+  fi
+
+  echo ">>> Images detected:"
+  for img in "${img_list[@]}"; do echo "    $img"; done
+
+  if [ -n "${IMAGE_MAP_FILE:-}" ] && [ -f "${IMAGE_MAP_FILE:-}" ]; then
+    echo ">>> Loading image map from $IMAGE_MAP_FILE"
+    while IFS='=' read -r orig repl; do
+      orig=$(echo "$orig" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+      repl=$(echo "$repl" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+      [[ -z "$orig" || -z "$repl" || "$orig" = \#* ]] && continue
+      IMAGE_MAP_ORIG+=("$orig")
+      IMAGE_MAP_REPL+=("$repl")
+    done < "$IMAGE_MAP_FILE"
+  elif [ "$PROMPT_REGISTRY" = "true" ]; then
+    for img in "${img_list[@]}"; do
+      if prompt_yn "Redirect image registry for '${img}'? [y/N]" "n"; then
+        local replacement=""
+        printf '  Enter replacement (full image ref OR registry host): ' >/dev/tty 2>/dev/null || true
+        read -r replacement </dev/tty 2>/dev/null || replacement=""
+        [[ -z "$replacement" ]] && continue
+        replacement="${replacement%/}"
+        if [[ "$replacement" == */* ]]; then
+          IMAGE_MAP_ORIG+=("$img")
+          IMAGE_MAP_REPL+=("$replacement")
+        else
+          IMAGE_MAP_ORIG+=("$img")
+          IMAGE_MAP_REPL+=("${replacement}/${img}")
+        fi
+      fi
+    done
+  fi
+
+  if [ ${#IMAGE_MAP_ORIG[@]} -gt 0 ] && [ -z "$IMAGE_PULL_SECRET" ] && [ "$PROMPT_REGISTRY" = "true" ]; then
+    printf 'Image pull secret name (leave empty for none): ' >/dev/tty 2>/dev/null || true
+    read -r IMAGE_PULL_SECRET </dev/tty 2>/dev/null || IMAGE_PULL_SECRET=""
+  fi
+}
+
+apply_image_redirects() {
+  if [ ${#IMAGE_MAP_ORIG[@]} -eq 0 ]; then
+    echo "(no rewrites)" > "$RUN_DIR/image-map.txt"
+    echo ">>> No image rewrites."
+    return 0
+  fi
+
+  echo ">>> Image rewrites:"
+  local i
+  for i in $(seq 0 $((${#IMAGE_MAP_ORIG[@]} - 1))); do
+    echo "    ${IMAGE_MAP_ORIG[$i]} -> ${IMAGE_MAP_REPL[$i]}"
+    echo "${IMAGE_MAP_ORIG[$i]}=${IMAGE_MAP_REPL[$i]}" >> "$RUN_DIR/image-map.txt"
+  done
+
+  for i in $(seq 0 $((${#IMAGE_MAP_ORIG[@]} - 1))); do
+    local orig="${IMAGE_MAP_ORIG[$i]}"
+    local repl="${IMAGE_MAP_REPL[$i]}"
+    local orig_esc
+    orig_esc=$(printf '%s' "$orig" | sed 's/[.[\*^$()+?{|\\]/\\&/g')
+    while IFS= read -r f; do
+      sed "s|${orig_esc}|${repl}|g" "$f" > "${f}.tmp" && mv "${f}.tmp" "$f"
+    done < <(find "$WORK_DIR" -name '*.yaml' -type f)
+  done
+
+  echo ">>> Image rewrites applied to staging."
+}
+
+# ---------------------------------------------------------------------------
+# Inject imagePullSecrets into staged templates
+# ---------------------------------------------------------------------------
+apply_image_pull_secret() {
+  [ -z "${IMAGE_PULL_SECRET:-}" ] && return 0
+  echo ">>> Injecting imagePullSecrets: $IMAGE_PULL_SECRET"
+  while IFS= read -r f; do
+    awk -v secret="$IMAGE_PULL_SECRET" '
+      /^[[:space:]]*containers:/ {
+        match($0, /^[[:space:]]*/);
+        indent = substr($0, RSTART, RLENGTH);
+        printf "%s%s\n", indent, "imagePullSecrets:";
+        printf "%s  - name: %s\n", indent, secret;
+      }
+      { print }
+    ' "$f" > "${f}.tmp" && mv "${f}.tmp" "$f"
+  done < <(find "$WORK_DIR/templates" -name '*.yaml' -type f)
+  echo "IMAGE_PULL_SECRET=$IMAGE_PULL_SECRET" >> "$RUN_DIR/modes.env"
+}
+
+# ---------------------------------------------------------------------------
+# Safety: estimate what the run will create
+# ---------------------------------------------------------------------------
+EST_PODS_PER_STEP=0
+EST_MAX_PODS=0
+EST_MAX_NAMESPACES=0
+EST_API_OBJECTS_PER_STEP=0
+EST_MAX_API_OBJECTS=0
+
+estimate_run_impact() {
+  local pods=1  # probe pod per step
+  [ "$MODE_CPU" = "on" ]     && pods=$((pods + RAMP_CPU_REPLICAS))
+  [ "$MODE_MEM" = "on" ]     && pods=$((pods + RAMP_MEM_REPLICAS))
+  [ "$MODE_DISK" = "on" ]    && pods=$((pods + RAMP_DISK_REPLICAS))
+  [ "$MODE_NETWORK" = "on" ] && pods=$((pods + RAMP_NET_REPLICAS + 2))  # clients + echo server
+  EST_PODS_PER_STEP=$pods
+  EST_MAX_PODS=$((pods * RAMP_STEPS))
+  EST_MAX_NAMESPACES=$((RAMP_STEPS + 1))  # kb-stress-N + kb-probe
+
+  if [ "$MODE_API" = "on" ]; then
+    EST_API_OBJECTS_PER_STEP=$((RAMP_API_ITERATIONS * RAMP_API_REPLICAS * 2))
+  fi
+  EST_MAX_API_OBJECTS=$((EST_API_OBJECTS_PER_STEP * RAMP_STEPS))
+}
+
+write_safety_plan() {
+  local plan="$RUN_DIR/safety-plan.txt"
+  local ctx
+  ctx=$(kubectl config current-context 2>/dev/null || echo "unknown")
+
+  {
+    echo "KubePyrometer Safety Plan"
+    echo "========================="
+    echo "Run ID:           $RUN_ID"
+    echo "Cluster context:  $ctx"
+    echo "Ramp steps:       $RAMP_STEPS"
+    echo ""
+    echo "Enabled modes:"
+    [ "$MODE_CPU" = "on" ]     && printf "  cpu      %d replicas/step x %sm\n" "$RAMP_CPU_REPLICAS" "$RAMP_CPU_MILLICORES"
+    [ "$MODE_MEM" = "on" ]     && printf "  mem      %d replicas/step x %d MB (tmpfs)\n" "$RAMP_MEM_REPLICAS" "$RAMP_MEM_MB"
+    [ "$MODE_DISK" = "on" ]    && printf "  disk     %d replicas/step x %d MB (emptyDir -- node disk)\n" "$RAMP_DISK_REPLICAS" "$RAMP_DISK_MB"
+    [ "$MODE_NETWORK" = "on" ] && printf "  network  %d replicas/step @ %ss interval\n" "$RAMP_NET_REPLICAS" "$RAMP_NET_INTERVAL"
+    [ "$MODE_API" = "on" ]     && printf "  api      %d iterations x %d replicas @ %d QPS\n" "$RAMP_API_ITERATIONS" "$RAMP_API_REPLICAS" "$RAMP_API_QPS"
+    echo ""
+    echo "Estimated impact:"
+    printf "  Max namespaces:        %d (%d stress + 1 probe)\n" "$EST_MAX_NAMESPACES" "$RAMP_STEPS"
+    printf "  Pods per step:         %d\n" "$EST_PODS_PER_STEP"
+    printf "  Max cumulative pods:   %d (%d x %d steps, no cleanup between steps)\n" "$EST_MAX_PODS" "$EST_PODS_PER_STEP" "$RAMP_STEPS"
+    if [ "$MODE_API" = "on" ]; then
+      printf "  API objects per step:  %d (%d x %d x 2)\n" "$EST_API_OBJECTS_PER_STEP" "$RAMP_API_ITERATIONS" "$RAMP_API_REPLICAS"
+      printf "  Max cumulative API:    %d\n" "$EST_MAX_API_OBJECTS"
+    fi
+    echo ""
+    echo "Safety limits:"
+    local pods_ok="OK" ns_ok="OK" obj_ok="OK"
+    [ "$EST_MAX_PODS" -gt "$SAFETY_MAX_PODS" ] && pods_ok="EXCEEDED ($EST_MAX_PODS > $SAFETY_MAX_PODS)"
+    [ "$EST_MAX_NAMESPACES" -gt "$SAFETY_MAX_NAMESPACES" ] && ns_ok="EXCEEDED ($EST_MAX_NAMESPACES > $SAFETY_MAX_NAMESPACES)"
+    [ "$EST_API_OBJECTS_PER_STEP" -gt "$SAFETY_MAX_OBJECTS_PER_STEP" ] && obj_ok="EXCEEDED ($EST_API_OBJECTS_PER_STEP > $SAFETY_MAX_OBJECTS_PER_STEP)"
+    printf "  Max pods:              %-6d  %s\n" "$SAFETY_MAX_PODS" "$pods_ok"
+    printf "  Max namespaces:        %-6d  %s\n" "$SAFETY_MAX_NAMESPACES" "$ns_ok"
+    printf "  Max objects per step:  %-6d  %s\n" "$SAFETY_MAX_OBJECTS_PER_STEP" "$obj_ok"
+    echo ""
+    if [ "$pods_ok" != "OK" ] || [ "$ns_ok" != "OK" ] || [ "$obj_ok" != "OK" ]; then
+      if [ "$SAFETY_BYPASS" = "1" ]; then
+        echo "Status: BYPASS ACTIVE (SAFETY_BYPASS=1)"
+      elif [ "$PROMPT_MODES" = "true" ]; then
+        echo "Status: AWAITING CONFIRMATION"
+      else
+        echo "Status: BLOCKED (set SAFETY_BYPASS=1 to override)"
+      fi
+    else
+      echo "Status: OK (all limits satisfied)"
+    fi
+  } > "$plan"
+  cat "$plan"
+}
+
+enforce_safety_limits() {
+  local exceeded=false
+  [ "$EST_MAX_PODS" -gt "$SAFETY_MAX_PODS" ] && exceeded=true
+  [ "$EST_MAX_NAMESPACES" -gt "$SAFETY_MAX_NAMESPACES" ] && exceeded=true
+  [ "$EST_API_OBJECTS_PER_STEP" -gt "$SAFETY_MAX_OBJECTS_PER_STEP" ] && exceeded=true
+
+  if [ "$exceeded" = "false" ]; then
+    return 0
+  fi
+
+  echo ""
+  echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+  echo "  WARNING: SAFETY LIMITS EXCEEDED"
+  echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+  [ "$EST_MAX_PODS" -gt "$SAFETY_MAX_PODS" ] && \
+    echo "  - Max pods: $EST_MAX_PODS exceeds limit $SAFETY_MAX_PODS"
+  [ "$EST_MAX_NAMESPACES" -gt "$SAFETY_MAX_NAMESPACES" ] && \
+    echo "  - Max namespaces: $EST_MAX_NAMESPACES exceeds limit $SAFETY_MAX_NAMESPACES"
+  [ "$EST_API_OBJECTS_PER_STEP" -gt "$SAFETY_MAX_OBJECTS_PER_STEP" ] && \
+    echo "  - API objects per step: $EST_API_OBJECTS_PER_STEP exceeds limit $SAFETY_MAX_OBJECTS_PER_STEP"
+  echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+  echo ""
+
+  if [ "$SAFETY_BYPASS" = "1" ]; then
+    echo ">>> SAFETY_BYPASS=1 is set -- proceeding despite exceeded limits."
+    return 0
+  fi
+
+  if [ "$PROMPT_MODES" = "true" ]; then
+    if ! prompt_yn "Safety limits exceeded. Continue anyway? [y/N]" "n"; then
+      echo "Aborted by user."
+      exit 1
+    fi
+    return 0
+  fi
+
+  echo "Aborting. Reduce settings, raise limits in config.yaml, or set SAFETY_BYPASS=1."
+  exit 1
+}
+
+# ---------------------------------------------------------------------------
+# Cluster fingerprint (best-effort, never fails the run)
+# ---------------------------------------------------------------------------
+collect_cluster_fingerprint() {
+  local fp="$RUN_DIR/cluster-fingerprint.txt"
+  echo ">>> Collecting cluster fingerprint"
+  {
+    echo "Cluster Fingerprint"
+    echo "==================="
+    echo ""
+
+    local ctx
+    ctx=$(kubectl config current-context 2>/dev/null || echo "unknown")
+    echo "Context: $ctx"
+    echo ""
+
+    echo "Kubernetes version:"
+    kubectl version --short 2>/dev/null || kubectl version 2>/dev/null || echo "  unknown"
+    echo ""
+
+    local node_count
+    node_count=$(kubectl get nodes --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    echo "Nodes: ${node_count:-unknown}"
+    local alloc_cpu alloc_mem
+    alloc_cpu=$(kubectl get nodes -o jsonpath='{range .items[*]}{.status.allocatable.cpu}{"\n"}{end}' 2>/dev/null | \
+      awk '{
+        v=$1;
+        if (v ~ /m$/) { sub(/m$/,"",v); total+=v }
+        else { total+=v*1000 }
+      } END { printf "%dm", total }' 2>/dev/null || echo "unknown")
+    alloc_mem=$(kubectl get nodes -o jsonpath='{range .items[*]}{.status.allocatable.memory}{"\n"}{end}' 2>/dev/null | \
+      awk '{
+        v=$1;
+        if (v ~ /Ki$/) { sub(/Ki$/,"",v); total+=v/1024 }
+        else if (v ~ /Mi$/) { sub(/Mi$/,"",v); total+=v }
+        else if (v ~ /Gi$/) { sub(/Gi$/,"",v); total+=v*1024 }
+        else { total+=v/1048576 }
+      } END { printf "%dMi", total }' 2>/dev/null || echo "unknown")
+    echo "  Allocatable CPU (total):    $alloc_cpu"
+    echo "  Allocatable Memory (total): $alloc_mem"
+    echo ""
+
+    echo "Node details:"
+    kubectl get nodes -o custom-columns=\
+'NAME:.metadata.name,CPU:.status.allocatable.cpu,MEM:.status.allocatable.memory,RUNTIME:.status.nodeInfo.containerRuntimeVersion' \
+      --no-headers 2>/dev/null | sed 's/^/  /' || echo "  unknown"
+    echo ""
+
+    echo "CNI hints (kube-system daemonsets):"
+    kubectl get daemonsets -n kube-system --no-headers -o custom-columns='NAME:.metadata.name' \
+      2>/dev/null | sed 's/^/  /' || echo "  unknown"
+    echo ""
+
+    echo "kube-proxy mode:"
+    local kp_cm
+    kp_cm=$(kubectl get configmap kube-proxy -n kube-system -o jsonpath='{.data.config\.conf}' 2>/dev/null || \
+            kubectl get configmap kube-proxy -n kube-system -o jsonpath='{.data.kubeconfig\.conf}' 2>/dev/null || true)
+    if [ -n "$kp_cm" ]; then
+      local mode
+      mode=$(echo "$kp_cm" | grep -i 'mode:' | head -1 | awk '{print $2}' 2>/dev/null || echo "unknown")
+      echo "  ${mode:-iptables (default)}"
+    else
+      echo "  unknown (configmap not readable)"
+    fi
+    echo ""
+
+    echo "API Priority and Fairness:"
+    local fs_count
+    fs_count=$(kubectl get flowschemas --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    if [ "${fs_count:-0}" -gt 0 ]; then
+      echo "  $fs_count FlowSchemas found"
+    else
+      echo "  not readable or not enabled"
+    fi
+    echo ""
+
+    echo "metrics-server:"
+    local ms_deploy
+    ms_deploy=$(kubectl get deployment metrics-server -n kube-system -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+    if [ -n "$ms_deploy" ]; then
+      echo "  present ($ms_deploy)"
+    else
+      echo "  not found"
+    fi
+    echo ""
+
+    echo "Harness settings:"
+    echo "  kube-burner: $KB_REQUIRED_VERSION"
+    echo "  config file: $CONFIG_FILE"
+    [ -n "${CONFIG_PROFILE:-}" ] && echo "  profile:     $CONFIG_PROFILE"
+    echo "  probe readyz: $PROBE_READYZ"
+    echo "  ramp steps:   $RAMP_STEPS"
+    echo "  monitor:      $([ "$CLUSTER_MONITOR" = "1" ] && echo "on (${MONITOR_INTERVAL}s)" || echo "off")"
+  } > "$fp" 2>/dev/null
+  echo ">>> Cluster fingerprint saved to $fp"
+}
+
+# ---------------------------------------------------------------------------
+# Helper: log a failure event
+# ---------------------------------------------------------------------------
+log_failure() {
+  local phase="$1" reason="$2"
+  local ts
+  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  printf '{"ts":"%s","phase":"%s","reason":"%s"}\n' "$ts" "$phase" "$reason" \
+    >> "$RUN_DIR/failures.log"
+  echo ">>> FAILURE: phase=$phase reason=$reason"
+}
+
+# ---------------------------------------------------------------------------
+# Helper: check ramp step health (pending pods, quota errors)
+# ---------------------------------------------------------------------------
+check_step_health() {
+  local step="$1"
+  local ns="kb-stress-$step"
+
+  if ! kubectl get ns "$ns" &>/dev/null; then
+    log_failure "ramp-step-$step" "namespace $ns does not exist"
+    return 1
+  fi
+
+  local pending
+  pending=$(kubectl get pods -n "$ns" --field-selector=status.phase=Pending --no-headers 2>/dev/null | wc -l | tr -d ' ')
+  if [ "${pending:-0}" -gt 0 ]; then
+    local events
+    events=$(kubectl get events -n "$ns" --field-selector=reason=FailedScheduling --no-headers 2>/dev/null | head -3)
+    if [ -n "$events" ]; then
+      log_failure "ramp-step-$step" "$pending pods Pending with FailedScheduling events"
+      return 1
+    fi
+  fi
+
+  local quota_errors
+  quota_errors=$(kubectl get events -n "$ns" --no-headers 2>/dev/null | grep -i 'exceeded quota\|forbidden.*quota' | head -1 || true)
+  if [ -n "$quota_errors" ]; then
+    log_failure "ramp-step-$step" "quota exceeded: $quota_errors"
+    return 1
+  fi
+
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Run directory — all artifacts land here
+# ---------------------------------------------------------------------------
+RUN_ID="$(date +%Y%m%d-%H%M%S)"
+if [ -n "${KUBEPYROMETER_HOME:-}" ]; then
+  RUN_DIR="${RUN_DIR:-$ORIG_CWD/runs/$RUN_ID}"
+else
+  RUN_DIR="${RUN_DIR:-$V0_DIR/runs/$RUN_ID}"
+fi
+mkdir -p "$RUN_DIR"
+echo ">>> Run artifacts: $RUN_DIR"
+
+setup_contention_modes
+estimate_run_impact
+write_safety_plan
+enforce_safety_limits
+collect_image_redirects
+ensure_staging
+generate_ramp_step
+apply_image_redirects
+apply_image_pull_secret
+cd "$WORK_DIR"
+
+MAIN_RC=0
+
+# ---------------------------------------------------------------------------
+# Artifact salvage — ALWAYS runs, even on failure
+# ---------------------------------------------------------------------------
+collect_artifacts() {
+  if [ -n "${MONITOR_PID:-}" ] && kill -0 "$MONITOR_PID" 2>/dev/null; then
+    echo ">>> Stopping cluster monitor (PID $MONITOR_PID)"
+    kill "$MONITOR_PID" 2>/dev/null || true
+    wait "$MONITOR_PID" 2>/dev/null || true
+  fi
+  echo ">>> Collecting artifacts into $RUN_DIR"
+  # kube-burner log files
+  for f in "$V0_DIR"/kube-burner-*.log; do
+    [ -f "$f" ] && mv "$f" "$RUN_DIR/" 2>/dev/null || true
+  done
+  # collected-metrics dirs
+  if [ -d "$V0_DIR/collected-metrics" ]; then
+    mv "$V0_DIR/collected-metrics" "$RUN_DIR/" 2>/dev/null || true
+  fi
+  # generate summary
+  bash "$V0_DIR/scripts/summarize.sh" "$RUN_DIR" 2>/dev/null || true
+  echo ">>> Artifacts collected. main_rc=$MAIN_RC"
+}
+trap collect_artifacts EXIT
+
+# ---------------------------------------------------------------------------
+# Log kube-burner binary path and version
+# ---------------------------------------------------------------------------
+{
+  echo "binary: $KB"
+  "$KB" version 2>&1
+} > "$RUN_DIR/kb-version.txt"
+echo ">>> kube-burner version:"
+cat "$RUN_DIR/kb-version.txt"
+
+# ---------------------------------------------------------------------------
+# Helper: record a phase result into phases.jsonl
+# ---------------------------------------------------------------------------
+record_phase() {
+  local phase="$1" uuid="$2" rc="$3" start="$4" end_t="$5" error="${6:-}"
+  local elapsed=$((end_t - start))
+  if [ -n "$error" ]; then
+    printf '{"phase":"%s","uuid":"%s","rc":%d,"start":%d,"end":%d,"elapsed_s":%d,"error":"%s"}\n' \
+      "$phase" "$uuid" "$rc" "$start" "$end_t" "$elapsed" "$error" \
+      >> "$RUN_DIR/phases.jsonl"
+  else
+    printf '{"phase":"%s","uuid":"%s","rc":%d,"start":%d,"end":%d,"elapsed_s":%d}\n' \
+      "$phase" "$uuid" "$rc" "$start" "$end_t" "$elapsed" \
+      >> "$RUN_DIR/phases.jsonl"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Helper: collect probe pod logs → probe.jsonl
+# ---------------------------------------------------------------------------
+collect_probe_logs() {
+  local phase="$1"
+  local job_name="probe-${phase}"
+  echo ">>> Collecting probe logs for phase=$phase job=$job_name"
+  kubectl logs -n kb-probe "job/${job_name}" --tail=-1 \
+    >> "$RUN_DIR/probe.jsonl" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# Helper: run a probe phase via kube-burner
+# ---------------------------------------------------------------------------
+run_probe() {
+  local phase="$1" duration="$2" interval="$3"
+  local uuid
+  uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen | tr '[:upper:]' '[:lower:]')
+  local start_ts rc
+  start_ts=$(date +%s)
+
+  echo ""
+  echo "========================================"
+  echo "  PROBE: $phase  (${duration}s every ${interval}s)"
+  echo "========================================"
+
+  local kb_flags=()
+  kb_flags+=(-c "$WORK_DIR/workloads/probe.yaml")
+  kb_flags+=(--uuid "$uuid")
+  kb_flags+=(--timeout "$KB_TIMEOUT")
+  if [ "$SKIP_LOG_FILE" = "true" ]; then
+    kb_flags+=(--skip-log-file)
+  fi
+
+  export PHASE="$phase"
+  export PROBE_DURATION="$duration"
+  export PROBE_INTERVAL="$interval"
+  export PROBE_READYZ
+  export RAMP_QPS
+  export RAMP_BURST
+
+  rc=0
+  "$KB" init "${kb_flags[@]}" 2>&1 | tee "$RUN_DIR/phase-${phase}.log" || rc=$?
+
+  local end_ts
+  end_ts=$(date +%s)
+  record_phase "$phase" "$uuid" "$rc" "$start_ts" "$end_ts"
+  collect_probe_logs "$phase"
+  return $rc
+}
+
+# ---------------------------------------------------------------------------
+# Helper: run a ramp step via kube-burner
+# ---------------------------------------------------------------------------
+run_ramp_step() {
+  local step="$1"
+  local uuid
+  uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen | tr '[:upper:]' '[:lower:]')
+  local start_ts rc
+  start_ts=$(date +%s)
+
+  echo ""
+  echo "========================================"
+  echo "  RAMP STEP $step"
+  echo "========================================"
+
+  local kb_flags=()
+  kb_flags+=(-c "$WORK_DIR/workloads/ramp-step.yaml")
+  kb_flags+=(--uuid "$uuid")
+  kb_flags+=(--timeout "$KB_TIMEOUT")
+  if [ "$SKIP_LOG_FILE" = "true" ]; then
+    kb_flags+=(--skip-log-file)
+  fi
+
+  export STEP="$step"
+  export CPU_MILLICORES="$RAMP_CPU_MILLICORES"
+  export CPU_REPLICAS="$RAMP_CPU_REPLICAS"
+  export MEM_MB="$RAMP_MEM_MB"
+  export MEM_REPLICAS="$RAMP_MEM_REPLICAS"
+  export DISK_MB="$RAMP_DISK_MB"
+  export DISK_REPLICAS="$RAMP_DISK_REPLICAS"
+  export NET_REPLICAS="$RAMP_NET_REPLICAS"
+  export NET_INTERVAL="$RAMP_NET_INTERVAL"
+  export API_QPS="$RAMP_API_QPS"
+  export API_BURST="$RAMP_API_BURST"
+  export API_ITERATIONS="$RAMP_API_ITERATIONS"
+  export API_REPLICAS="$RAMP_API_REPLICAS"
+  export RAMP_QPS
+  export RAMP_BURST
+  export RAMP_PROBE_DURATION
+  export RAMP_PROBE_INTERVAL
+  export PROBE_READYZ
+
+  rc=0
+  "$KB" init "${kb_flags[@]}" 2>&1 | tee "$RUN_DIR/phase-ramp-step-${step}.log" || rc=$?
+
+  local end_ts
+  end_ts=$(date +%s)
+  record_phase "ramp-step-${step}" "$uuid" "$rc" "$start_ts" "$end_ts"
+  collect_probe_logs "ramp-step-${step}"
+  return $rc
+}
+
+# ---------------------------------------------------------------------------
+# Helper: teardown stress namespaces
+# ---------------------------------------------------------------------------
+teardown_stress() {
+  echo ""
+  echo "========================================"
+  echo "  TEARDOWN"
+  echo "========================================"
+  local start_ts rc=0
+  start_ts=$(date +%s)
+
+  for i in $(seq 1 "$RAMP_STEPS"); do
+    echo ">>> Deleting namespace kb-stress-$i"
+    kubectl delete ns "kb-stress-$i" --ignore-not-found --wait=true --timeout=120s 2>&1 || true
+  done
+
+  local end_ts
+  end_ts=$(date +%s)
+  record_phase "teardown" "n/a" "$rc" "$start_ts" "$end_ts"
+}
+
+# ===========================================================================
+#  MAIN SEQUENCE
+# ===========================================================================
+# ---------------------------------------------------------------------------
+# Pre-load bundled images (skip if -r / IMAGE_MAP_FILE / SKIP_IMAGE_LOAD)
+# ---------------------------------------------------------------------------
+IMAGES_TAR="$V0_DIR/images/harness-images.tar"
+if [ -f "$IMAGES_TAR" ] \
+   && [ "$PROMPT_REGISTRY" = "false" ] \
+   && [ -z "${IMAGE_MAP_FILE:-}" ] \
+   && [ "${SKIP_IMAGE_LOAD:-0}" != "1" ]; then
+  echo ">>> Loading bundled images from $IMAGES_TAR"
+  bash "$V0_DIR/scripts/load-images.sh" "$IMAGES_TAR" || {
+    echo "WARN: image load failed; pods will attempt registry pull"
+  }
+else
+  if [ ! -f "$IMAGES_TAR" ]; then
+    echo ">>> No bundled image archive found; pods will pull from registry"
+  else
+    echo ">>> Skipping bundled image load (registry redirect active or SKIP_IMAGE_LOAD=1)"
+  fi
+fi
+
+echo ">>> Setting up RBAC for probes"
+kubectl apply -f "$WORK_DIR/manifests/probe-rbac.yaml"
+
+# --- CLUSTER FINGERPRINT ---
+collect_cluster_fingerprint
+
+# --- CLUSTER MONITOR ---
+MONITOR_PID=""
+if [ "$CLUSTER_MONITOR" = "1" ]; then
+  echo ">>> Starting cluster monitor (interval=${MONITOR_INTERVAL}s)"
+  MONITOR_OUTPUT="$RUN_DIR/cluster-monitor.log" \
+  MONITOR_INTERVAL="$MONITOR_INTERVAL" \
+    bash "$V0_DIR/scripts/cluster-monitor.sh" &
+  MONITOR_PID=$!
+  echo ">>> Cluster monitor PID: $MONITOR_PID"
+fi
+
+# --- BASELINE ---
+run_probe "baseline" "$BASELINE_PROBE_DURATION" "$BASELINE_PROBE_INTERVAL" || MAIN_RC=1
+
+# --- RAMP STEPS ---
+for step in $(seq 1 "$RAMP_STEPS"); do
+  if ! run_ramp_step "$step"; then
+    log_failure "ramp-step-$step" "kube-burner exited non-zero"
+    MAIN_RC=1
+    break
+  fi
+  if ! check_step_health "$step"; then
+    MAIN_RC=1
+    break
+  fi
+done
+
+# --- TEARDOWN (always, even if ramp failed) ---
+teardown_stress || true
+
+# --- RECOVERY ---
+run_probe "recovery" "$RECOVERY_PROBE_DURATION" "$RECOVERY_PROBE_INTERVAL" || MAIN_RC=1
+
+echo ""
+echo "========================================"
+if [ "$MAIN_RC" -eq 0 ]; then
+  echo "  ALL PHASES PASSED"
+else
+  echo "  ONE OR MORE PHASES FAILED (rc=$MAIN_RC)"
+fi
+echo "  Artifacts: $RUN_DIR"
+echo "========================================"
+
+exit "$MAIN_RC"

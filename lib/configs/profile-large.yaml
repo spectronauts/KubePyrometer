@@ -1,0 +1,29 @@
+# Profile: large
+# Safer defaults for large/production clusters: fewer replicas, smaller
+# increments, longer probe windows, tighter safety limits.
+
+ramp_steps: 5
+baseline_probe_duration: 30
+baseline_probe_interval: 5
+ramp_probe_duration: 30
+ramp_probe_interval: 5
+recovery_probe_duration: 30
+recovery_probe_interval: 5
+kb_timeout: 5m
+
+ramp_cpu_replicas: 2
+ramp_cpu_millicores: 100
+ramp_mem_replicas: 1
+ramp_mem_mb: 32
+ramp_disk_replicas: 2
+ramp_disk_mb: 32
+ramp_net_replicas: 2
+ramp_net_interval: 1
+ramp_api_qps: 10
+ramp_api_burst: 20
+ramp_api_iterations: 20
+ramp_api_replicas: 2
+
+safety_max_pods: 500
+safety_max_namespaces: 50
+safety_max_objects_per_step: 1000

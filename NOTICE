@@ -1,0 +1,19 @@
+KubePyrometer
+Copyright 2026 Carlos Garcia
+
+This product downloads and uses kube-burner
+(https://github.com/kube-burner/kube-burner) at runtime, which is licensed
+under the Apache License, Version 2.0.
+
+This product bundles the following container images in
+lib/images/harness-images.tar:
+
+  busybox 1.36.1 (https://busybox.net)
+    License: GPL v2
+    Source:  https://busybox.net/source.html
+
+  bitnami/kubectl 1.35.2 (https://github.com/bitnami/containers)
+    License: Apache License, Version 2.0
+    Upstream: kubectl is part of the Kubernetes project
+              (https://github.com/kubernetes/kubernetes),
+              licensed under the Apache License, Version 2.0.

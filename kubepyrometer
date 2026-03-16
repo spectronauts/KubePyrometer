@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+# Resolve the data directory containing templates, scripts, workloads, etc.
+# Homebrew installs these under libexec/; repo checkout has them under lib/.
+resolve_home() {
+  if [ -n "${KUBEPYROMETER_HOME:-}" ]; then
+    return 0
+  fi
+
+  # Follow symlinks to find the real location of this script.
+  local target="$0"
+  while [ -L "$target" ]; do
+    local link_dir
+    link_dir="$(cd "$(dirname "$target")" && pwd)"
+    target="$(readlink "$target")"
+    [[ "$target" != /* ]] && target="$link_dir/$target"
+  done
+  local self_dir
+  self_dir="$(cd "$(dirname "$target")" && pwd)"
+
+  # Homebrew layout: Cellar/<name>/<ver>/bin/kubepyrometer → ../libexec/kubepyrometer/
+  local brew_libexec="$self_dir/../libexec/kubepyrometer"
+  if [ -d "$brew_libexec/scripts" ]; then
+    KUBEPYROMETER_HOME="$(cd "$brew_libexec" && pwd)"
+    return 0
+  fi
+
+  # Repo checkout layout: kubepyrometer sits next to lib/
+  if [ -d "$self_dir/lib/scripts" ]; then
+    KUBEPYROMETER_HOME="$self_dir/lib"
+    return 0
+  fi
+
+  echo "ERROR: cannot locate KubePyrometer data directory."
+  echo "Set KUBEPYROMETER_HOME to the directory containing scripts/, templates/, etc."
+  exit 1
+}
+
+resolve_home
+export KUBEPYROMETER_HOME
+
+# VERSION lives at repo root (next to this script) or inside KUBEPYROMETER_HOME (Homebrew).
+_script_dir="$(cd "$(dirname "$0")" && pwd)"
+KUBEPYROMETER_VERSION="$(cat "$KUBEPYROMETER_HOME/VERSION" 2>/dev/null || cat "$_script_dir/VERSION" 2>/dev/null || echo "dev")"
+unset _script_dir
+
+# ---------------------------------------------------------------------------
+# Config file search (for 'run' subcommand)
+#   -f flag > CONFIG_FILE env > ./kubepyrometer.yaml > ~/.kubepyrometer/config.yaml > built-in
+# ---------------------------------------------------------------------------
+resolve_config() {
+  [ -n "${CONFIG_FILE:-}" ] && return 0
+
+  if [ -f "./kubepyrometer.yaml" ]; then
+    export CONFIG_FILE="$(pwd)/kubepyrometer.yaml"
+  elif [ -f "$HOME/.kubepyrometer/config.yaml" ]; then
+    export CONFIG_FILE="$HOME/.kubepyrometer/config.yaml"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Usage
+# ---------------------------------------------------------------------------
+usage() {
+  cat <<EOF
+kubepyrometer $KUBEPYROMETER_VERSION — Kubernetes control-plane load-testing harness
+
+Usage:
+  kubepyrometer <command> [options]
+
+Commands:
+  run          Run the load-testing harness
+  init         Generate a default config file in the current directory
+  summarize    Generate summary CSVs from a run directory
+  monitor      Start the cluster resource monitor
+  tui          Launch interactive TUI (requires gum)
+  bundle       Package run artifacts into a tarball
+  version      Print version information
+  help         Show this help message
+
+Run 'kubepyrometer <command> --help' for more information on a command.
+EOF
+}
+
+usage_run() {
+  cat <<EOF
+Usage: kubepyrometer run [options]
+
+Options:
+  -f CONFIG    Config file path (default: ./kubepyrometer.yaml, ~/.kubepyrometer/config.yaml)
+  -o DIR       Output directory for run artifacts (default: ./runs/<timestamp>)
+  -p PROFILE   Load a built-in config profile (e.g., 'large')
+  -i           Interactive mode (prompt for everything)
+  -c           Prompt for contention mode selection
+  -r           Prompt for image registry redirect
+  -h           Show this help message
+
+Config precedence: env vars > -p profile > -f config > built-in defaults
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Subcommands
+# ---------------------------------------------------------------------------
+cmd_run() {
+  resolve_config
+  exec bash "$KUBEPYROMETER_HOME/run.sh" "$@"
+}
+
+cmd_init() {
+  local dest="${1:-kubepyrometer.yaml}"
+  if [ -f "$dest" ]; then
+    echo "Config file already exists: $dest"
+    echo "Remove it first or choose a different name."
+    exit 1
+  fi
+  cp "$KUBEPYROMETER_HOME/config.yaml" "$dest"
+  echo "Created $dest with default settings."
+  echo "Edit this file, then run:  kubepyrometer run"
+}
+
+cmd_summarize() {
+  if [ $# -eq 0 ] || [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+    echo "Usage: kubepyrometer summarize <run-dir>"
+    [ $# -eq 0 ] && exit 1 || exit 0
+  fi
+  exec bash "$KUBEPYROMETER_HOME/scripts/summarize.sh" "$@"
+}
+
+cmd_monitor() {
+  exec bash "$KUBEPYROMETER_HOME/scripts/cluster-monitor.sh" "$@"
+}
+
+cmd_bundle() {
+  if [ $# -eq 0 ] || [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+    echo "Usage: kubepyrometer bundle <run-dir>"
+    [ $# -eq 0 ] && exit 1 || exit 0
+  fi
+  exec bash "$KUBEPYROMETER_HOME/scripts/bundle-run.sh" "$@"
+}
+
+cmd_tui() {
+  exec bash "$KUBEPYROMETER_HOME/scripts/v0tui.sh" "$@"
+}
+
+cmd_version() {
+  echo "kubepyrometer $KUBEPYROMETER_VERSION"
+  local kb=""
+  if [ -n "${KB_BIN:-}" ] && [ -x "$KB_BIN" ]; then
+    kb="$KB_BIN"
+  elif command -v kube-burner &>/dev/null; then
+    kb="$(command -v kube-burner)"
+  elif [ -x "$HOME/.kubepyrometer/bin/kube-burner" ]; then
+    kb="$HOME/.kubepyrometer/bin/kube-burner"
+  elif [ -x "$KUBEPYROMETER_HOME/bin/kube-burner" ]; then
+    kb="$KUBEPYROMETER_HOME/bin/kube-burner"
+  fi
+  if [ -n "$kb" ]; then
+    echo "kube-burner: $("$kb" version 2>&1 | head -1)"
+  else
+    echo "kube-burner: not installed (will be downloaded on first run)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Dispatch
+# ---------------------------------------------------------------------------
+COMMAND="${1:-help}"
+shift 2>/dev/null || true
+
+case "$COMMAND" in
+  run)        cmd_run "$@" ;;
+  init)       cmd_init "$@" ;;
+  summarize)  cmd_summarize "$@" ;;
+  monitor)    cmd_monitor "$@" ;;
+  bundle)     cmd_bundle "$@" ;;
+  tui|-tui|--tui) cmd_tui "$@" ;;
+  version|-v|--version) cmd_version ;;
+  help|-h|--help)       usage ;;
+  *)
+    echo "Unknown command: $COMMAND"
+    echo ""
+    usage
+    exit 1
+    ;;
+esac

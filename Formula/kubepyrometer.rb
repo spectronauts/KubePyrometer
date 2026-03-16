@@ -1,10 +1,6 @@
 # Homebrew formula for KubePyrometer
 # Install:
-#   brew tap spectronauts/kubepyrometer https://github.com/spectronauts/KubePyrometer
-#   brew install kubepyrometer
-#
-# Or from a dedicated tap repo:
-#   brew tap spectronauts/tap
+#   brew tap spectronauts/kubepyrometer
 #   brew install kubepyrometer
 
 class Kubepyrometer < Formula

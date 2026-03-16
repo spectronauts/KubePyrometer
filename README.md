@@ -11,7 +11,7 @@ No Go toolchain required -- the harness automatically downloads a pinned kube-bu
 ### Homebrew (macOS / Linux)
 
 ```bash
-brew tap spectronauts/kubepyrometer https://github.com/spectronauts/KubePyrometer
+brew tap spectronauts/kubepyrometer
 brew install kubepyrometer
 ```
 

@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 V0_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-OUTPUT="$V0_DIR/bin/kube-burner"
+OUTPUT="${KB_OUTPUT:-$V0_DIR/bin/kube-burner}"
 
 KB_VERSION="v2.4.0"
 VERSION_NO_V="${KB_VERSION#v}"

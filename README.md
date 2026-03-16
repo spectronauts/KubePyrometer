@@ -6,19 +6,50 @@ No Go toolchain required -- the harness automatically downloads a pinned kube-bu
 
 > **Note:** Probe latency depends on the node the probe pod is scheduled to, the cluster's network topology, and API server configuration. Results reflect the specific measurement path, not an absolute property of the cluster.
 
+## Installation
+
+### Homebrew (macOS / Linux)
+
+```bash
+brew tap <org>/kubepyrometer https://github.com/<org>/KubePyrometer
+brew install kubepyrometer
+```
+
+### From source
+
+```bash
+git clone https://github.com/<org>/KubePyrometer.git
+cd KubePyrometer
+make install              # installs to /usr/local by default
+# or: make install PREFIX=$HOME/.local
+```
+
+### No install (run from repo checkout)
+
+```bash
+git clone https://github.com/<org>/KubePyrometer.git
+cd KubePyrometer
+./kubepyrometer run       # or: v0/run.sh (still works)
+```
+
 ## Quickstart (30 seconds)
 
 ```bash
 # 1. Point kubectl at your target cluster
 kubectl config current-context
 
-# 2. Run the harness (non-interactive, default parameters)
-v0/run.sh
+# 2. Generate a config file (optional -- sensible defaults are built in)
+kubepyrometer init
 
-# 3. View results
-cat "$(ls -dt v0/runs/*/ | head -1)/summary.csv"
-cat "$(ls -dt v0/runs/*/ | head -1)/probe-stats.csv"
+# 3. Run the harness (non-interactive, default parameters)
+kubepyrometer run
+
+# 4. View results
+cat "$(ls -dt runs/*/ | head -1)/summary.csv"
+cat "$(ls -dt runs/*/ | head -1)/probe-stats.csv"
 ```
+
+> **Direct invocation:** `v0/run.sh` still works from a repo checkout and behaves identically to previous versions.
 
 Example output (`summary.csv`):
 
@@ -75,8 +106,8 @@ During ramp steps, the harness checks for namespace creation failures, pods stuc
 For large or production clusters, use the `large` profile for safer defaults (smaller increments, longer probe windows, tighter safety limits):
 
 ```bash
-v0/run.sh -p large
-# or: CONFIG_PROFILE=large v0/run.sh
+kubepyrometer run -p large
+# or: CONFIG_PROFILE=large kubepyrometer run
 ```
 
 ### Recommendations
@@ -99,7 +130,7 @@ BASELINE probe  ->  RAMP stress (N steps)  ->  TEARDOWN  ->  RECOVERY probe
 - **Teardown** -- Deletes all stress namespaces.
 - **Recovery probe** -- Identical to baseline, measures how quickly control-plane latency returns to baseline levels.
 
-Every phase is recorded to `phases.jsonl`, probe measurements go to `probe.jsonl`, and CSV summaries are generated. All artifacts land in a timestamped run directory under `v0/runs/`.
+Every phase is recorded to `phases.jsonl`, probe measurements go to `probe.jsonl`, and CSV summaries are generated. All artifacts land in a timestamped run directory (`./runs/YYYYMMDD-HHMMSS/` by default, or the path set with `-o`).
 
 ## Contention modes
 
@@ -115,21 +146,32 @@ The harness supports five contention modes, each independently enabled or disabl
 
 The cpu, mem, disk, and network stress modes use `busybox:1.36.1` and run as unprivileged pods with no `NET_ADMIN` capabilities or PVCs. Network stress deploys a lightweight echo server (busybox httpd) and client pods that download a 64 KB payload in a loop, saturating pod network I/O without requiring any RBAC or API server access. The api stress mode uses kube-burner's native object creation to hammer the API server through the full request path (authn, authz, admission, etcd). The probe pods use `bitnami/kubectl:1.35.2`.
 
-### CLI flags
-
-By default, `run.sh` runs **non-interactively** using `config.yaml` and environment variable defaults. Use flags to enable interactive prompts:
+### CLI commands
 
 ```
-v0/run.sh              # non-interactive (default)
-v0/run.sh -i           # fully interactive (modes + registry)
-v0/run.sh -c           # prompt for contention mode selection/settings
-v0/run.sh -r           # prompt for image registry redirect + pull secret
-v0/run.sh -p large     # load a config profile (e.g., safer defaults for production)
-v0/run.sh -cr          # prompt for both
-v0/run.sh -h           # show usage help
+kubepyrometer run              # non-interactive (default)
+kubepyrometer run -i           # fully interactive (modes + registry)
+kubepyrometer run -c           # prompt for contention mode selection/settings
+kubepyrometer run -r           # prompt for image registry redirect + pull secret
+kubepyrometer run -p large     # load a config profile (e.g., safer defaults for production)
+kubepyrometer run -f my.yaml   # use a specific config file
+kubepyrometer run -o ./out     # write run artifacts to a custom directory
+kubepyrometer init             # generate a default kubepyrometer.yaml in the current directory
+kubepyrometer summarize <dir>  # regenerate summary CSVs from a run directory
+kubepyrometer monitor          # start the cluster resource monitor standalone
+kubepyrometer bundle <dir>     # package run artifacts into a shareable tarball
+kubepyrometer version          # print version information
 ```
+
+**Config file search order** (for `kubepyrometer run` without `-f`):
+1. `CONFIG_FILE` environment variable
+2. `./kubepyrometer.yaml` in the current directory
+3. `~/.kubepyrometer/config.yaml`
+4. Built-in defaults
 
 `NONINTERACTIVE=1` is still supported for backward compatibility and overrides any flags.
+
+> **Direct invocation:** `v0/run.sh [-i] [-c] [-r] [-p PROFILE] [-f CONFIG] [-o OUTDIR]` still works from a repo checkout.
 
 ### Interactive mode (`-i` or `-c`)
 
@@ -222,10 +264,10 @@ In non-interactive mode (default), use environment variables to control behavior
 
 ```bash
 # Enable extra contention modes
-MODE_DISK=on MODE_NETWORK=on v0/run.sh
+MODE_DISK=on MODE_NETWORK=on kubepyrometer run
 
 # Redirect images via a map file and supply a pull secret
-IMAGE_MAP_FILE=my-images.txt IMAGE_PULL_SECRET=my-registry-creds SKIP_IMAGE_LOAD=1 v0/run.sh
+IMAGE_MAP_FILE=my-images.txt IMAGE_PULL_SECRET=my-registry-creds SKIP_IMAGE_LOAD=1 kubepyrometer run
 ```
 
 ### Mode-specific settings
@@ -369,46 +411,46 @@ Node listing requires a ClusterRole because nodes are cluster-scoped. Configmap 
 
 ### Step 3: Run the harness
 
-With default parameters (`v0/config.yaml`), non-interactive:
+With default parameters, non-interactive:
 
 ```bash
-v0/run.sh
+kubepyrometer run
 ```
 
 Fully interactive (contention modes + registry redirect prompts):
 
 ```bash
-v0/run.sh -i
+kubepyrometer run -i
 ```
 
 Interactive for contention modes only:
 
 ```bash
-v0/run.sh -c
+kubepyrometer run -c
 ```
 
 With a custom config file:
 
 ```bash
-CONFIG_FILE=v0/configs/eks-small.yaml v0/run.sh
+kubepyrometer run -f v0/configs/eks-small.yaml
 ```
 
 With environment variable overrides (highest precedence):
 
 ```bash
-RAMP_STEPS=3 RAMP_CPU_REPLICAS=2 RAMP_CPU_MILLICORES=250 MODE_DISK=on v0/run.sh
+RAMP_STEPS=3 RAMP_CPU_REPLICAS=2 RAMP_CPU_MILLICORES=250 MODE_DISK=on kubepyrometer run
 ```
 
 ### Step 4: Verify artifacts
 
-The run directory is printed at the start and end of every run:
+The run directory is printed at the start and end of every run. When using the CLI, artifacts are written to `./runs/<timestamp>/` by default (override with `-o`).
 
 ```bash
 # Find the latest run
-ls -dt v0/runs/*/ | head -1
+ls -dt runs/*/ | head -1
 
 # Check contents
-RUN_DIR=$(ls -dt v0/runs/*/ | head -1)
+RUN_DIR=$(ls -dt runs/*/ | head -1)
 cat "$RUN_DIR/kb-version.txt"
 cat "$RUN_DIR/modes.env"
 cat "$RUN_DIR/phases.jsonl"
@@ -465,7 +507,7 @@ The smoke test uses intentionally small parameter values (1 ramp step, 10s probe
 
 ### `config.yaml`
 
-Contains every tunable variable. Each key is uppercased and exported as an env var (e.g., `ramp_steps: 2` becomes `RAMP_STEPS=2`). Environment variables take precedence over the config file, so any key below can also be overridden at the command line (e.g., `RAMP_STEPS=5 v0/run.sh`). In interactive mode (`-i` or `-c`), prompts override both.
+Contains every tunable variable. Each key is uppercased and exported as an env var (e.g., `ramp_steps: 2` becomes `RAMP_STEPS=2`). Environment variables take precedence over the config file, so any key below can also be overridden at the command line (e.g., `RAMP_STEPS=5 kubepyrometer run`). In interactive mode (`-i` or `-c`), prompts override both. Run `kubepyrometer init` to generate a copy of this file in the current directory.
 
 | Key | Default | Description |
 |-----|---------|-------------|
@@ -538,18 +580,18 @@ CLUSTER_MONITOR=1 MONITOR_INTERVAL=5 v0/run.sh
 **Standalone mode** (run in a separate terminal, writes to stdout):
 
 ```bash
-bash v0/scripts/cluster-monitor.sh --interval 5
-bash v0/scripts/cluster-monitor.sh --interval 10 --output monitor.log
+kubepyrometer monitor --interval 5
+kubepyrometer monitor --interval 10 --output monitor.log
 ```
 
 ### Use a custom kube-burner binary
 
 ```bash
 # Must be v2.4.0 (enforced by default)
-KB_BIN=/usr/local/bin/kube-burner v0/run.sh
+KB_BIN=/usr/local/bin/kube-burner kubepyrometer run
 
 # Skip version check
-KB_BIN=/path/to/custom-build KB_ALLOW_ANY=1 v0/run.sh
+KB_BIN=/path/to/custom-build KB_ALLOW_ANY=1 kubepyrometer run
 ```
 
 ### Build kube-burner from source (optional)
@@ -588,7 +630,7 @@ bash v0/scripts/build-kube-burner.sh
 
 ## Run artifacts
 
-Each run creates `v0/runs/YYYYMMDD-HHMMSS/` containing:
+Each run creates `runs/YYYYMMDD-HHMMSS/` (or a custom path via `-o`) containing:
 
 - **`kb-version.txt`** -- Binary path and full version output
 - **`modes.env`** -- Human-readable KEY=VALUE record of selected contention modes and settings
@@ -607,11 +649,11 @@ Each run creates `v0/runs/YYYYMMDD-HHMMSS/` containing:
 
 ## Sharing results (support bundle)
 
-Use `scripts/bundle-run.sh` to package a run's artifacts into a `.tar.gz` for sharing with teammates or support:
+Use `kubepyrometer bundle` to package a run's artifacts into a `.tar.gz` for sharing with teammates or support:
 
 ```bash
-bash v0/scripts/bundle-run.sh v0/runs/20260306-113300
-# Creates: v0/runs/20260306-113300/kubepyrometer-20260306-113300.tar.gz
+kubepyrometer bundle runs/20260306-113300
+# Creates: runs/20260306-113300/kubepyrometer-20260306-113300.tar.gz
 ```
 
 The bundle includes summaries, JSONL data, phase logs, cluster fingerprint, failure logs, and configuration snapshots. It excludes the `staging/` directory (bulky template copies) and any cluster credentials. The resulting archive is safe to attach to tickets or send to colleagues for review.
@@ -619,6 +661,11 @@ The bundle includes summaries, JSONL data, phase logs, cluster fingerprint, fail
 ## Folder structure
 
 ```
+kubepyrometer                       # CLI entry point (subcommands: run, init, summarize, etc.)
+VERSION                             # Release version (e.g. 0.1.0)
+Makefile                            # install / uninstall / dist targets
+Formula/kubepyrometer.rb            # Homebrew formula
+.github/workflows/release.yml      # GitHub Actions release automation
 v0/
 ├── run.sh                          # Main harness entrypoint
 ├── config.yaml                     # Default parameters (overridable via env)
@@ -684,14 +731,18 @@ v0/
 
 ## File reference
 
+### `kubepyrometer` (CLI entry point)
+
+The top-level CLI wrapper. Resolves the data directory (`KUBEPYROMETER_HOME`), dispatches to subcommands (`run`, `init`, `summarize`, `monitor`, `bundle`, `version`), and handles config file search (see [CLI commands](#cli-commands)). When installed via Homebrew, data files live under `$(brew --prefix)/libexec/kubepyrometer/`; from a repo checkout, they're found under `v0/`.
+
 ### `run.sh`
 
-The main entrypoint. Accepts `-i` (full interactive), `-c` (contention mode prompts), `-r` (registry redirect prompts), `-p PROFILE` (load a config profile), or no flags (non-interactive default). Resolves the kube-burner binary, parses `config.yaml` (and an optional profile), stages templates into the run directory, generates a filtered `ramp-step.yaml` containing only the enabled modes, computes and enforces safety limits, optionally applies image registry rewrites and `imagePullSecrets`, loads bundled images, applies RBAC, collects a cluster fingerprint, then orchestrates the four-phase sequence. During ramp steps, it checks for scheduling failures and quota violations, aborting early if issues are detected. All artifacts are collected into a timestamped `runs/` directory, even on failure.
+The core harness engine (called by `kubepyrometer run`). Accepts `-i` (full interactive), `-c` (contention mode prompts), `-r` (registry redirect prompts), `-p PROFILE` (load a config profile), `-f CONFIG` (config file path), `-o OUTDIR` (output directory), or no flags (non-interactive default). Resolves the kube-burner binary, parses the config file (and an optional profile), stages templates into the run directory, generates a filtered `ramp-step.yaml` containing only the enabled modes, computes and enforces safety limits, optionally applies image registry rewrites and `imagePullSecrets`, loads bundled images, applies RBAC, collects a cluster fingerprint, then orchestrates the four-phase sequence. During ramp steps, it checks for scheduling failures and quota violations, aborting early if issues are detected. All artifacts are collected into a timestamped `runs/` directory, even on failure.
 
 **kube-burner resolution order:**
 1. `KB_BIN` env var (must be executable; version-checked against v2.4.0 unless `KB_ALLOW_ANY=1`)
 2. System `kube-burner` in `$PATH` (only if it reports v2.4.0)
-3. `v0/bin/kube-burner` (auto-downloaded via `install-kube-burner.sh` if missing)
+3. `~/.kubepyrometer/bin/kube-burner` (when installed via Homebrew) or `v0/bin/kube-burner` (repo checkout) -- auto-downloaded via `install-kube-burner.sh` if missing
 
 ### `scripts/kind-smoke.sh`
 

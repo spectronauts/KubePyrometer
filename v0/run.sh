@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-V0_DIR="$(cd "$(dirname "$0")" && pwd)"
+ORIG_CWD="$(pwd)"
+
+if [ -n "${KUBEPYROMETER_HOME:-}" ]; then
+  V0_DIR="$KUBEPYROMETER_HOME"
+else
+  V0_DIR="$(cd "$(dirname "$0")" && pwd)"
+fi
 CONFIG_FILE="${CONFIG_FILE:-$V0_DIR/config.yaml}"
 
 KB_REQUIRED_VERSION="v2.4.0"
@@ -33,10 +39,15 @@ resolve_kb() {
   fi
 
   # 3) Local binary, install if missing
-  KB="$V0_DIR/bin/kube-burner"
+  if [ -n "${KUBEPYROMETER_HOME:-}" ]; then
+    KB_CACHE_DIR="${HOME}/.kubepyrometer/bin"
+  else
+    KB_CACHE_DIR="$V0_DIR/bin"
+  fi
+  KB="$KB_CACHE_DIR/kube-burner"
   if [ ! -x "$KB" ]; then
     echo ">>> kube-burner not found — installing $KB_REQUIRED_VERSION"
-    bash "$V0_DIR/scripts/install-kube-burner.sh"
+    KB_OUTPUT="$KB" bash "$V0_DIR/scripts/install-kube-burner.sh"
   fi
 
   if [ ! -x "$KB" ]; then
@@ -78,20 +89,24 @@ parse_config() {
 PROMPT_MODES=false
 PROMPT_REGISTRY=false
 
-while getopts "icrp:h" opt; do
+while getopts "icrp:f:o:h" opt; do
   case "$opt" in
     i) PROMPT_MODES=true; PROMPT_REGISTRY=true ;;
     c) PROMPT_MODES=true ;;
     r) PROMPT_REGISTRY=true ;;
     p) export CONFIG_PROFILE="$OPTARG" ;;
-    h) echo "Usage: run.sh [-i] [-c] [-r] [-p PROFILE]"
+    f) export CONFIG_FILE="$OPTARG" ;;
+    o) export RUN_DIR="$OPTARG" ;;
+    h) echo "Usage: run.sh [-i] [-c] [-r] [-p PROFILE] [-f CONFIG] [-o OUTDIR]"
        echo "  -i          Interactive (prompt for everything)"
        echo "  -c          Prompt for contention mode selection/settings"
        echo "  -r          Prompt for image registry redirect and pull secret"
        echo "  -p PROFILE  Load a config profile (e.g., 'large')"
+       echo "  -f CONFIG   Path to config file"
+       echo "  -o OUTDIR   Output directory for run artifacts"
        echo "  Default: non-interactive, uses config.yaml / env var defaults"
        exit 0 ;;
-    *) echo "Usage: run.sh [-i] [-c] [-r] [-p PROFILE] [-h]" >&2; exit 1 ;;
+    *) echo "Usage: run.sh [-i] [-c] [-r] [-p PROFILE] [-f CONFIG] [-o OUTDIR] [-h]" >&2; exit 1 ;;
   esac
 done
 shift $((OPTIND - 1))
@@ -119,6 +134,13 @@ if [ -n "${CONFIG_PROFILE:-}" ]; then
 fi
 
 parse_config "$CONFIG_FILE"
+
+# If the user supplied a custom config, also load built-in defaults for any
+# parameters they didn't override (parse_config only sets unset variables).
+BUILTIN_CONFIG="$V0_DIR/config.yaml"
+if [ -f "$BUILTIN_CONFIG" ] && [ "$(cd "$(dirname "$CONFIG_FILE")" && pwd)/$(basename "$CONFIG_FILE")" != "$(cd "$(dirname "$BUILTIN_CONFIG")" && pwd)/$(basename "$BUILTIN_CONFIG")" ] 2>/dev/null; then
+  parse_config "$BUILTIN_CONFIG"
+fi
 
 # ---------------------------------------------------------------------------
 # Defaults (overridable by config.yaml or environment)
@@ -827,7 +849,11 @@ check_step_health() {
 # Run directory — all artifacts land here
 # ---------------------------------------------------------------------------
 RUN_ID="$(date +%Y%m%d-%H%M%S)"
-RUN_DIR="${RUN_DIR:-$V0_DIR/runs/$RUN_ID}"
+if [ -n "${KUBEPYROMETER_HOME:-}" ]; then
+  RUN_DIR="${RUN_DIR:-$ORIG_CWD/runs/$RUN_ID}"
+else
+  RUN_DIR="${RUN_DIR:-$V0_DIR/runs/$RUN_ID}"
+fi
 mkdir -p "$RUN_DIR"
 echo ">>> Run artifacts: $RUN_DIR"
 

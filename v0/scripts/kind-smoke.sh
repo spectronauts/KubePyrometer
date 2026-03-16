@@ -2,7 +2,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-V0_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+if [ -n "${KUBEPYROMETER_HOME:-}" ]; then
+  V0_DIR="$KUBEPYROMETER_HOME"
+else
+  V0_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+fi
 
 KIND_CLUSTER="${KIND_CLUSTER:-kb-smoke}"
 CREATED_CLUSTER=false
@@ -44,7 +48,14 @@ kubectl wait --for=condition=Ready node --all --timeout=60s
 IMAGES_TAR="$V0_DIR/images/harness-images.tar"
 if [ -f "$IMAGES_TAR" ]; then
   echo ">>> Pre-loading bundled images into Kind cluster"
-  kind load image-archive "$IMAGES_TAR" --name "$KIND_CLUSTER"
+  NODE="${KIND_CLUSTER}-control-plane"
+  if docker exec -i "$NODE" ctr --namespace=k8s.io images import - < "$IMAGES_TAR" 2>/dev/null; then
+    echo ">>> Images loaded via ctr import"
+  elif kind load image-archive "$IMAGES_TAR" --name "$KIND_CLUSTER" 2>/dev/null; then
+    echo ">>> Images loaded via kind load"
+  else
+    echo "WARN: Kind image load failed; pods will attempt registry pull"
+  fi
 fi
 
 # ------------------------------------------------------------------

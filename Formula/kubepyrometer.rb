@@ -1,18 +1,17 @@
 # Homebrew formula for KubePyrometer
 # Install:
-#   brew tap <org>/kubepyrometer https://github.com/<org>/KubePyrometer
+#   brew tap spectronauts/kubepyrometer https://github.com/spectronauts/KubePyrometer
 #   brew install kubepyrometer
 #
 # Or from a dedicated tap repo:
-#   brew tap <org>/tap
+#   brew tap spectronauts/tap
 #   brew install kubepyrometer
 
 class Kubepyrometer < Formula
   desc "Kubernetes control-plane load-testing harness"
-  homepage "https://github.com/<org>/KubePyrometer"
-  # TODO: update URL and sha256 after first release
-  url "https://github.com/<org>/KubePyrometer/releases/download/v0.1.0/kubepyrometer-0.1.0.tar.gz"
-  sha256 "PLACEHOLDER"
+  homepage "https://github.com/spectronauts/KubePyrometer"
+  url "https://github.com/spectronauts/KubePyrometer/releases/download/v0.3.0-preview/kubepyrometer-0.3.0-preview.tar.gz"
+  sha256 "fb89ecb7d5a17f77493218d5c6295a340546b54c77fe4a94c10a7df81d3b0753"
   license "Apache-2.0"
 
   depends_on "bash"

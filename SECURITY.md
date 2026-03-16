@@ -2,14 +2,15 @@
 
 ## Supported Versions
 
-| Version          | Supported          |
-|------------------|--------------------|
-| v0.2.x (preview) | Yes (pre-release)  |
-| v0.1.x           | Yes                |
+| Version              | Supported          |
+|----------------------|--------------------|
+| v0.3.x (preview)     | Yes (pre-release)  |
+| v0.2.x               | Yes                |
+| v0.1.x               | Yes                |
 
 ## Reporting a Vulnerability
 
-If you discover a security issue in KubePyrometer, please report it privately by emailing **carlosatspectro@users.noreply.github.com** or by opening a [GitHub Security Advisory](https://github.com/carlosatspectro/KubePyrometer/security/advisories/new).
+If you discover a security issue in KubePyrometer, please report it privately by emailing **carlosatspectro@users.noreply.github.com** or by opening a [GitHub Security Advisory](https://github.com/spectronauts/KubePyrometer/security/advisories/new).
 
 Do not open a public issue for security vulnerabilities. You should receive an acknowledgment within 72 hours.
 

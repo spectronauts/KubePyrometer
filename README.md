@@ -11,14 +11,14 @@ No Go toolchain required -- the harness automatically downloads a pinned kube-bu
 ### Homebrew (macOS / Linux)
 
 ```bash
-brew tap <org>/kubepyrometer https://github.com/<org>/KubePyrometer
+brew tap spectronauts/kubepyrometer https://github.com/spectronauts/KubePyrometer
 brew install kubepyrometer
 ```
 
 ### From source
 
 ```bash
-git clone https://github.com/<org>/KubePyrometer.git
+git clone https://github.com/spectronauts/KubePyrometer.git
 cd KubePyrometer
 make install              # installs to /usr/local by default
 # or: make install PREFIX=$HOME/.local
@@ -27,7 +27,7 @@ make install              # installs to /usr/local by default
 ### No install (run from repo checkout)
 
 ```bash
-git clone https://github.com/<org>/KubePyrometer.git
+git clone https://github.com/spectronauts/KubePyrometer.git
 cd KubePyrometer
 ./kubepyrometer run       # or: v0/run.sh (still works)
 ```
@@ -175,7 +175,7 @@ kubepyrometer version          # print version information
 
 ### Interactive mode (`-i` or `-c`)
 
-When you run `v0/run.sh -i` (or `-c`), it prompts for each mode in order before starting the test sequence:
+When you run `kubepyrometer run -i` (or `-c`), it prompts for each mode in order before starting the test sequence:
 
 ```
 >>> Contention mode selection
@@ -206,7 +206,7 @@ All enable prompts default to **YES** (press Enter to accept). Settings show the
 
 ### Registry redirect (`-i` or `-r`)
 
-When you run `v0/run.sh -i` (or `-r`), the harness prompts for image registry redirects (useful for air-gapped clusters or private registries). If any images are redirected, it also asks for an optional `imagePullSecrets` name -- the Secret is injected into all pod specs so kubelet can authenticate to the private registry. You are responsible for creating the Secret beforehand (see workflow below).
+When you run `kubepyrometer run -i` (or `-r`), the harness prompts for image registry redirects (useful for air-gapped clusters or private registries). If any images are redirected, it also asks for an optional `imagePullSecrets` name -- the Secret is injected into all pod specs so kubelet can authenticate to the private registry. You are responsible for creating the Secret beforehand (see workflow below).
 
 For non-interactive registry redirect, use an **image map file** and set `IMAGE_MAP_FILE` and `IMAGE_PULL_SECRET` via `config.yaml` or environment variables.
 
@@ -245,7 +245,7 @@ kubectl create secret docker-registry my-registry-creds \
   -n default
 
 # 3. Run with the map file + pull secret
-IMAGE_MAP_FILE=my-images.txt IMAGE_PULL_SECRET=my-registry-creds SKIP_IMAGE_LOAD=1 v0/run.sh
+IMAGE_MAP_FILE=my-images.txt IMAGE_PULL_SECRET=my-registry-creds SKIP_IMAGE_LOAD=1 kubepyrometer run
 ```
 
 Or configure it in `config.yaml` for repeatable runs:
@@ -565,7 +565,7 @@ When enabled, it runs in the background and writes timestamped snapshots to `clu
 **Enable via interactive mode:**
 
 ```bash
-v0/run.sh -i
+kubepyrometer run -i
 # ... contention mode prompts ...
 # Enable cluster monitor (kubectl top)? [Y/n] y
 #   Monitor interval (seconds) [10]: 5
@@ -574,7 +574,7 @@ v0/run.sh -i
 **Enable via environment variable:**
 
 ```bash
-CLUSTER_MONITOR=1 MONITOR_INTERVAL=5 v0/run.sh
+CLUSTER_MONITOR=1 MONITOR_INTERVAL=5 kubepyrometer run
 ```
 
 **Standalone mode** (run in a separate terminal, writes to stdout):
@@ -662,7 +662,7 @@ The bundle includes summaries, JSONL data, phase logs, cluster fingerprint, fail
 
 ```
 kubepyrometer                       # CLI entry point (subcommands: run, init, summarize, etc.)
-VERSION                             # Release version (e.g. 0.1.0)
+VERSION                             # Release version (e.g. 0.3.0-preview)
 Makefile                            # install / uninstall / dist targets
 Formula/kubepyrometer.rb            # Homebrew formula
 .github/workflows/release.yml      # GitHub Actions release automation

@@ -48,13 +48,15 @@ kubectl wait --for=condition=Ready node --all --timeout=60s
 IMAGES_TAR="$V0_DIR/images/harness-images.tar"
 if [ -f "$IMAGES_TAR" ]; then
   echo ">>> Pre-loading bundled images into Kind cluster"
-  NODE="${KIND_CLUSTER}-control-plane"
-  if docker exec -i "$NODE" ctr --namespace=k8s.io images import - < "$IMAGES_TAR" 2>/dev/null; then
-    echo ">>> Images loaded via ctr import"
-  elif kind load image-archive "$IMAGES_TAR" --name "$KIND_CLUSTER" 2>/dev/null; then
+  if kind load image-archive "$IMAGES_TAR" --name "$KIND_CLUSTER" 2>/dev/null; then
     echo ">>> Images loaded via kind load"
   else
-    echo "WARN: Kind image load failed; pods will attempt registry pull"
+    NODE="${KIND_CLUSTER}-control-plane"
+    if docker exec -i "$NODE" ctr --namespace=k8s.io images import - < "$IMAGES_TAR" 2>/dev/null; then
+      echo ">>> Images loaded via ctr import"
+    else
+      echo "WARN: Kind image load failed; pods will attempt registry pull"
+    fi
   fi
 fi
 
@@ -72,7 +74,7 @@ export RAMP_MEM_REPLICAS=1
 export RAMP_MEM_MB=32
 export RECOVERY_PROBE_DURATION=10
 export RECOVERY_PROBE_INTERVAL=2
-export KB_TIMEOUT=3m
+export KB_TIMEOUT=5m
 export SKIP_LOG_FILE=true
 export SKIP_IMAGE_LOAD=1
 export NONINTERACTIVE=1

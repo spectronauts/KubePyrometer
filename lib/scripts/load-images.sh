@@ -20,13 +20,15 @@ CONTEXT="$(kubectl config current-context 2>/dev/null || true)"
 if [[ "$CONTEXT" == kind-* ]]; then
   CLUSTER_NAME="${CONTEXT#kind-}"
   echo ">>> Loading images into Kind cluster: $CLUSTER_NAME"
-  NODE="${CLUSTER_NAME}-control-plane"
-  if docker exec -i "$NODE" ctr --namespace=k8s.io images import - < "$TAR_FILE" 2>/dev/null; then
-    echo ">>> Images loaded via ctr import"
-  elif kind load image-archive "$TAR_FILE" --name "$CLUSTER_NAME" 2>/dev/null; then
+  if kind load image-archive "$TAR_FILE" --name "$CLUSTER_NAME" 2>/dev/null; then
     echo ">>> Images loaded via kind load"
   else
-    echo "WARN: Kind image load failed; pods will attempt registry pull"
+    NODE="${CLUSTER_NAME}-control-plane"
+    if docker exec -i "$NODE" ctr --namespace=k8s.io images import - < "$TAR_FILE" 2>/dev/null; then
+      echo ">>> Images loaded via ctr import"
+    else
+      echo "WARN: Kind image load failed; pods will attempt registry pull"
+    fi
   fi
 elif command -v k3d &>/dev/null && k3d cluster list 2>/dev/null | grep -q .; then
   echo ">>> Loading images into k3d cluster"

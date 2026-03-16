@@ -4,14 +4,22 @@ set -uo pipefail
 # Resolve the data directory containing templates, scripts, workloads, etc.
 # Homebrew installs these under libexec/; repo checkout has them under v0/.
 resolve_home() {
-  local self_dir
-  self_dir="$(cd "$(dirname "$0")" && pwd)"
-
   if [ -n "${KUBEPYROMETER_HOME:-}" ]; then
     return 0
   fi
 
-  # Homebrew layout: bin/kubepyrometer → ../libexec/kubepyrometer/
+  # Follow symlinks to find the real location of this script.
+  local target="$0"
+  while [ -L "$target" ]; do
+    local link_dir
+    link_dir="$(cd "$(dirname "$target")" && pwd)"
+    target="$(readlink "$target")"
+    [[ "$target" != /* ]] && target="$link_dir/$target"
+  done
+  local self_dir
+  self_dir="$(cd "$(dirname "$target")" && pwd)"
+
+  # Homebrew layout: Cellar/<name>/<ver>/bin/kubepyrometer → ../libexec/kubepyrometer/
   local brew_libexec="$self_dir/../libexec/kubepyrometer"
   if [ -d "$brew_libexec/scripts" ]; then
     KUBEPYROMETER_HOME="$(cd "$brew_libexec" && pwd)"
@@ -32,8 +40,10 @@ resolve_home() {
 resolve_home
 export KUBEPYROMETER_HOME
 
-SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
-KUBEPYROMETER_VERSION="$(cat "$SELF_DIR/VERSION" 2>/dev/null || cat "$KUBEPYROMETER_HOME/VERSION" 2>/dev/null || echo "dev")"
+# VERSION lives at repo root (next to this script) or inside KUBEPYROMETER_HOME (Homebrew).
+_script_dir="$(cd "$(dirname "$0")" && pwd)"
+KUBEPYROMETER_VERSION="$(cat "$KUBEPYROMETER_HOME/VERSION" 2>/dev/null || cat "$_script_dir/VERSION" 2>/dev/null || echo "dev")"
+unset _script_dir
 
 # ---------------------------------------------------------------------------
 # Config file search (for 'run' subcommand)

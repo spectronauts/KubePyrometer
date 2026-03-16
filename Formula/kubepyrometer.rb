@@ -14,12 +14,12 @@ class Kubepyrometer < Formula
   depends_on "kubectl" => :recommended
 
   def install
-    libexec.install Dir["v0/scripts", "v0/workloads", "v0/templates",
-                        "v0/manifests", "v0/configs", "v0/images",
-                        "v0/config.yaml", "v0/run.sh"]
-    libexec.install "VERSION"
+    kp = libexec/"kubepyrometer"
+    kp.install Dir["v0/scripts", "v0/workloads", "v0/templates",
+                   "v0/manifests", "v0/configs", "v0/images",
+                   "v0/config.yaml", "v0/run.sh"]
+    kp.install "VERSION"
 
-    # The main CLI resolves KUBEPYROMETER_HOME from its install location.
     bin.install "kubepyrometer"
   end
 

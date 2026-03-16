@@ -299,6 +299,10 @@ RAMP_API_ITERATIONS=$RAMP_API_ITERATIONS
 RAMP_API_REPLICAS=$RAMP_API_REPLICAS
 CLUSTER_MONITOR=$CLUSTER_MONITOR
 MONITOR_INTERVAL=$MONITOR_INTERVAL
+RAMP_QPS=$RAMP_QPS
+RAMP_BURST=$RAMP_BURST
+KB_TIMEOUT=$KB_TIMEOUT
+RAMP_STEPS=$RAMP_STEPS
 EOF
 
   local cpu_en mem_en disk_en net_en api_en
@@ -741,8 +745,37 @@ collect_cluster_fingerprint() {
         else if (v ~ /Gi$/) { sub(/Gi$/,"",v); total+=v*1024 }
         else { total+=v/1048576 }
       } END { printf "%dMi", total }' 2>/dev/null || echo "unknown")
+    local alloc_pods
+    alloc_pods=$(kubectl get nodes -o jsonpath='{range .items[*]}{.status.allocatable.pods}{"\n"}{end}' 2>/dev/null | \
+      awk '{ total+=$1 } END { printf "%d", total }' 2>/dev/null || echo "unknown")
+
+    local req_cpu req_mem running_pods
+    req_cpu=$(kubectl get pods --all-namespaces -o jsonpath='{range .items[*]}{range .spec.containers[*]}{.resources.requests.cpu}{"\n"}{end}{end}' 2>/dev/null | \
+      awk '{
+        v=$1;
+        if (v == "") next;
+        if (v ~ /m$/) { sub(/m$/,"",v); total+=v }
+        else { total+=v*1000 }
+      } END { printf "%dm", total }' 2>/dev/null || echo "unknown")
+    req_mem=$(kubectl get pods --all-namespaces -o jsonpath='{range .items[*]}{range .spec.containers[*]}{.resources.requests.memory}{"\n"}{end}{end}' 2>/dev/null | \
+      awk '{
+        v=$1;
+        if (v == "") next;
+        if (v ~ /Ki$/) { sub(/Ki$/,"",v); total+=v/1024 }
+        else if (v ~ /Mi$/) { sub(/Mi$/,"",v); total+=v }
+        else if (v ~ /Gi$/) { sub(/Gi$/,"",v); total+=v*1024 }
+        else if (v ~ /m$/) { next }
+        else { total+=v/1048576 }
+      } END { printf "%dMi", total }' 2>/dev/null || echo "unknown")
+    running_pods=$(kubectl get pods --all-namespaces --no-headers 2>/dev/null | wc -l | tr -d ' ' || echo "unknown")
+
     echo "  Allocatable CPU (total):    $alloc_cpu"
     echo "  Allocatable Memory (total): $alloc_mem"
+    echo "  Allocatable Pods (total):   $alloc_pods"
+    echo ""
+    echo "  Requested CPU (current):    $req_cpu"
+    echo "  Requested Memory (current): $req_mem"
+    echo "  Running Pods (current):     $running_pods"
     echo ""
 
     echo "Node details:"

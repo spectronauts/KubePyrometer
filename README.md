@@ -695,7 +695,7 @@ The bundle includes summaries, JSONL data, phase logs, cluster fingerprint, fail
 
 ```
 kubepyrometer                       # CLI entry point (subcommands: run, init, summarize, etc.)
-VERSION                             # Release version (e.g. 1.1.0)
+VERSION                             # Release version (e.g. 1.2.0)
 Makefile                            # install / uninstall / dist targets
 .github/workflows/release.yml      # GitHub Actions release automation
 lib/

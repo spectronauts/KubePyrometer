@@ -13,6 +13,7 @@ PHASES_FILE="$RUN_DIR/phases.jsonl"
 PROBE_FILE="$RUN_DIR/probe.jsonl"
 FINGERPRINT_FILE="$RUN_DIR/cluster-fingerprint.txt"
 SAFETY_FILE="$RUN_DIR/safety-plan.txt"
+MODES_FILE="$RUN_DIR/modes.env"
 
 # ---------------------------------------------------------------------------
 # Helpers — parse JSON fields without jq
@@ -27,6 +28,12 @@ red()   { printf '\033[31m%s\033[0m\n' "$*"; }
 yellow(){ printf '\033[33m%s\033[0m\n' "$*"; }
 
 divider() { echo "────────────────────────────────────────────────────────"; }
+
+# Read a KEY=VALUE from modes.env
+mode_val() { grep "^$1=" "$MODES_FILE" 2>/dev/null | head -1 | cut -d= -f2- || true; }
+
+# Read a numeric value after a label in the fingerprint
+fp_num() { grep -i "$1" "$FINGERPRINT_FILE" 2>/dev/null | head -1 | grep -o '[0-9]*' | head -1 || true; }
 
 # ---------------------------------------------------------------------------
 # 1) Run overview
@@ -267,7 +274,7 @@ section_config() {
 }
 
 # ---------------------------------------------------------------------------
-# 5) Failure diagnosis
+# 5) Failure diagnosis (resource-exhaustion vs rate-limiting aware)
 # ---------------------------------------------------------------------------
 section_failures() {
   [ ! -f "$PHASES_FILE" ] && return
@@ -275,6 +282,19 @@ section_failures() {
   fail_count=$(grep -c '"rc":[1-9]' "$PHASES_FILE" 2>/dev/null || true)
   fail_count="${fail_count:-0}"
   [ "$fail_count" = "0" ] && return
+
+  # Gather capacity and throttle context for smarter diagnosis
+  local ramp_qps ramp_burst kb_timeout ramp_steps
+  ramp_qps=$(mode_val RAMP_QPS)
+  ramp_burst=$(mode_val RAMP_BURST)
+  kb_timeout=$(mode_val KB_TIMEOUT)
+  ramp_steps=$(mode_val RAMP_STEPS)
+
+  local alloc_cpu_raw alloc_pods_raw req_cpu_raw running_pods_raw
+  alloc_cpu_raw=$(grep -i 'Allocatable CPU' "$FINGERPRINT_FILE" 2>/dev/null | head -1 | grep -o '[0-9]*' | head -1 || true)
+  alloc_pods_raw=$(grep -i 'Allocatable Pods' "$FINGERPRINT_FILE" 2>/dev/null | head -1 | grep -o '[0-9]*' | head -1 || true)
+  req_cpu_raw=$(grep -i 'Requested CPU' "$FINGERPRINT_FILE" 2>/dev/null | head -1 | grep -o '[0-9]*' | head -1 || true)
+  running_pods_raw=$(grep -i 'Running Pods' "$FINGERPRINT_FILE" 2>/dev/null | head -1 | grep -o '[0-9]*' | head -1 || true)
 
   bold "FAILURE DIAGNOSIS"
   divider
@@ -305,8 +325,66 @@ section_failures() {
         echo "    Detail: the probe pod did not complete within the timeout"
         echo "    Likely: image pull failure, pod scheduling issue, or insufficient resources"
       else
-        echo "    Detail: stress workload objects did not reach Ready state"
-        echo "    Likely: insufficient cluster resources, image pull issues, or node pressure"
+        echo "    Detail: stress workload objects did not reach Ready state in time"
+
+        # --- Smart diagnosis: is this a resource limit or a throttle? ---
+        local is_throttle=false is_capacity=false
+
+        # Check resource headroom from fingerprint
+        if [ -n "$alloc_pods_raw" ] && [ -n "$running_pods_raw" ] && [ "$alloc_pods_raw" -gt 0 ] 2>/dev/null; then
+          local pod_pct=$(( running_pods_raw * 100 / alloc_pods_raw ))
+          if [ "$pod_pct" -ge 85 ]; then
+            is_capacity=true
+            echo "    Signal: pod capacity is ${pod_pct}% consumed (${running_pods_raw}/${alloc_pods_raw} allocatable pods)"
+          else
+            echo "    Signal: pod capacity is only ${pod_pct}% consumed — cluster has headroom"
+          fi
+        fi
+        if [ -n "$alloc_cpu_raw" ] && [ "$alloc_cpu_raw" -gt 0 ] && [ -n "$req_cpu_raw" ] 2>/dev/null; then
+          local cpu_pct=$(( req_cpu_raw * 100 / alloc_cpu_raw ))
+          if [ "$cpu_pct" -ge 80 ]; then
+            is_capacity=true
+            echo "    Signal: CPU is ${cpu_pct}% allocated"
+          fi
+        fi
+
+        # Check for kube-burner self-throttling via QPS/burst
+        if [ -n "$ramp_qps" ] && [ "$ramp_qps" -le 50 ] 2>/dev/null; then
+          is_throttle=true
+          echo "    Signal: RAMP_QPS=$ramp_qps — kube-burner API request rate may be too low"
+        fi
+        if [ -n "$ramp_burst" ] && [ "$ramp_burst" -le 50 ] 2>/dev/null; then
+          is_throttle=true
+          echo "    Signal: RAMP_BURST=$ramp_burst — kube-burner burst limit may be too low"
+        fi
+
+        # Check if phase durations are climbing linearly (throttle signature)
+        local step_num
+        step_num=$(echo "$phase" | grep -o '[0-9]*$' || true)
+        if [ -n "$step_num" ] && [ "$step_num" -gt 5 ]; then
+          local early_dur late_dur
+          early_dur=$(grep '"phase":"ramp-step-1"' "$PHASES_FILE" 2>/dev/null | json_num elapsed_s || true)
+          late_dur=$(echo "$line" | json_num elapsed_s || true)
+          if [ -n "$early_dur" ] && [ -n "$late_dur" ] && [ "$early_dur" -gt 0 ] 2>/dev/null; then
+            local dur_ratio=$(( late_dur / early_dur ))
+            if [ "$dur_ratio" -ge 3 ]; then
+              is_throttle=true
+              echo "    Signal: step $step_num took ${late_dur}s vs ${early_dur}s for step 1 (${dur_ratio}x increase) — consistent with API throttling"
+            fi
+          fi
+        fi
+
+        # Verdict
+        if [ "$is_capacity" = "true" ] && [ "$is_throttle" = "false" ]; then
+          red "    Assessment: RESOURCE EXHAUSTION — the cluster ran out of capacity"
+        elif [ "$is_throttle" = "true" ] && [ "$is_capacity" = "false" ]; then
+          yellow "    Assessment: RATE LIMITING — kube-burner is self-throttling; raise RAMP_QPS/RAMP_BURST or KB_TIMEOUT"
+        elif [ "$is_throttle" = "true" ] && [ "$is_capacity" = "true" ]; then
+          yellow "    Assessment: MIXED — cluster resources are high AND kube-burner may be throttling; check both"
+        else
+          echo "    Assessment: timeout without clear resource or throttle signal"
+          echo "    Likely: insufficient cluster resources, image pull issues, or node pressure"
+        fi
       fi
     fi
 
@@ -347,76 +425,106 @@ section_failures() {
 }
 
 # ---------------------------------------------------------------------------
-# 6) Capacity context
+# 6) Capacity context (enriched with allocatable vs requested)
 # ---------------------------------------------------------------------------
 section_capacity() {
   [ ! -f "$FINGERPRINT_FILE" ] && return
-  [ ! -f "$SAFETY_FILE" ] && return
-
-  local total_cpu total_mem
-  total_cpu=$(grep -i 'total cpu' "$FINGERPRINT_FILE" 2>/dev/null | grep -o '[0-9]*' | head -1 || true)
-  total_mem=$(grep -i 'total memory' "$FINGERPRINT_FILE" 2>/dev/null | grep -o '[0-9]*' | head -1 || true)
-
-  [ -z "$total_cpu" ] && [ -z "$total_mem" ] && return
 
   bold "CAPACITY CONTEXT"
   divider
 
-  if [ -n "$total_cpu" ]; then
-    local cpu_millis
-    cpu_millis=$(grep 'cpu.*replicas.*x' "$SAFETY_FILE" 2>/dev/null | grep -o '[0-9]*m' | head -1 | tr -d 'm' || true)
-    local cpu_reps
-    cpu_reps=$(grep 'cpu.*replicas.*x' "$SAFETY_FILE" 2>/dev/null | grep -o '[0-9]* replicas' | head -1 | grep -o '[0-9]*' || true)
-    local steps
-    steps=$(grep 'Ramp steps:' "$SAFETY_FILE" 2>/dev/null | grep -o '[0-9]*' || echo "1")
+  # Allocatable totals from fingerprint
+  local alloc_cpu alloc_mem alloc_pods
+  alloc_cpu=$(grep -i 'Allocatable CPU' "$FINGERPRINT_FILE" 2>/dev/null | head -1 | grep -o '[0-9]*' | head -1 || true)
+  alloc_mem=$(grep -i 'Allocatable Memory' "$FINGERPRINT_FILE" 2>/dev/null | head -1 | grep -o '[0-9]*' | head -1 || true)
+  alloc_pods=$(grep -i 'Allocatable Pods' "$FINGERPRINT_FILE" 2>/dev/null | head -1 | grep -o '[0-9]*' | head -1 || true)
 
-    if [ -n "$cpu_millis" ] && [ -n "$cpu_reps" ]; then
-      local total_stress_cpu=$((cpu_millis * cpu_reps * steps))
-      local cluster_cpu_millis=$((total_cpu * 1000))
-      if [ "$cluster_cpu_millis" -gt 0 ]; then
-        local pct_x10=$((total_stress_cpu * 1000 / cluster_cpu_millis))
-        local pct_whole=$((pct_x10 / 10))
-        local pct_frac=$((pct_x10 % 10))
-        echo "  CPU pressure:  ${total_stress_cpu}m requested / ${cluster_cpu_millis}m available (${pct_whole}.${pct_frac}%)"
-      fi
+  # Requested / running from fingerprint
+  local req_cpu req_mem running_pods
+  req_cpu=$(grep -i 'Requested CPU' "$FINGERPRINT_FILE" 2>/dev/null | head -1 | grep -o '[0-9]*' | head -1 || true)
+  req_mem=$(grep -i 'Requested Memory' "$FINGERPRINT_FILE" 2>/dev/null | head -1 | grep -o '[0-9]*' | head -1 || true)
+  running_pods=$(grep -i 'Running Pods' "$FINGERPRINT_FILE" 2>/dev/null | head -1 | grep -o '[0-9]*' | head -1 || true)
+
+  # QPS / burst from modes.env
+  local ramp_qps ramp_burst kb_timeout ramp_steps
+  ramp_qps=$(mode_val RAMP_QPS)
+  ramp_burst=$(mode_val RAMP_BURST)
+  kb_timeout=$(mode_val KB_TIMEOUT)
+  ramp_steps=$(mode_val RAMP_STEPS)
+
+  # CPU (fingerprint values are already in millicores)
+  if [ -n "$alloc_cpu" ] && [ "$alloc_cpu" -gt 0 ] 2>/dev/null; then
+    if [ -n "$req_cpu" ] && [ "$req_cpu" -gt 0 ] 2>/dev/null; then
+      local cpu_pct=$(( req_cpu * 100 / alloc_cpu ))
+      local free_cpu=$(( alloc_cpu - req_cpu ))
+      printf '  CPU:    %sm requested / %sm allocatable (%s%% used, %sm free)\n' \
+        "$req_cpu" "$alloc_cpu" "$cpu_pct" "$free_cpu"
+    else
+      echo "  CPU:    ${alloc_cpu}m allocatable (pre-run requests not captured)"
     fi
   fi
 
-  if [ -n "$total_mem" ]; then
-    local mem_mb
-    mem_mb=$(grep 'mem.*replicas.*x' "$SAFETY_FILE" 2>/dev/null | grep -o '[0-9]* MB' | head -1 | grep -o '[0-9]*' || true)
-    local mem_reps
-    mem_reps=$(grep 'mem.*replicas.*x' "$SAFETY_FILE" 2>/dev/null | grep -o '[0-9]* replicas' | head -1 | grep -o '[0-9]*' || true)
-    local steps
-    steps=$(grep 'Ramp steps:' "$SAFETY_FILE" 2>/dev/null | grep -o '[0-9]*' || echo "1")
+  # Memory (fingerprint values are already in MiB)
+  if [ -n "$alloc_mem" ] && [ "$alloc_mem" -gt 0 ] 2>/dev/null; then
+    if [ -n "$req_mem" ] && [ "$req_mem" -gt 0 ] 2>/dev/null; then
+      local mem_pct=$(( req_mem * 100 / alloc_mem ))
+      local free_mem=$(( alloc_mem - req_mem ))
+      printf '  Memory: %sMi requested / %sMi allocatable (%s%% used, %sMi free)\n' \
+        "$req_mem" "$alloc_mem" "$mem_pct" "$free_mem"
+    else
+      echo "  Memory: ${alloc_mem}Mi allocatable (pre-run requests not captured)"
+    fi
+  fi
 
-    if [ -n "$mem_mb" ] && [ -n "$mem_reps" ]; then
-      local total_stress_mem=$((mem_mb * mem_reps * steps))
-      local total_mem_mb=$((total_mem / 1024))
-      if [ "$total_mem_mb" -gt 0 ]; then
-        local pct_x10=$((total_stress_mem * 1000 / total_mem_mb))
-        local pct_whole=$((pct_x10 / 10))
-        local pct_frac=$((pct_x10 % 10))
-        echo "  Mem pressure:  ${total_stress_mem}MB requested / ${total_mem_mb}MB available (${pct_whole}.${pct_frac}%)"
-      fi
+  # Pods
+  if [ -n "$alloc_pods" ] && [ "$alloc_pods" -gt 0 ] 2>/dev/null; then
+    if [ -n "$running_pods" ] 2>/dev/null; then
+      local pod_pct=$(( running_pods * 100 / alloc_pods ))
+      local free_pods=$(( alloc_pods - running_pods ))
+      printf '  Pods:   %s running / %s allocatable (%s%% used, %s free)\n' \
+        "$running_pods" "$alloc_pods" "$pod_pct" "$free_pods"
+    else
+      echo "  Pods:   ${alloc_pods} allocatable (pre-run count not captured)"
     fi
   fi
 
   echo ""
+
+  # Rate-limit config
+  if [ -n "$ramp_qps" ] || [ -n "$ramp_burst" ] || [ -n "$kb_timeout" ]; then
+    bold "RATE-LIMIT & TIMEOUT CONFIG"
+    divider
+    [ -n "$ramp_qps" ]   && echo "  RAMP_QPS:     $ramp_qps"
+    [ -n "$ramp_burst" ] && echo "  RAMP_BURST:   $ramp_burst"
+    [ -n "$kb_timeout" ] && echo "  KB_TIMEOUT:   $kb_timeout"
+    [ -n "$ramp_steps" ] && echo "  RAMP_STEPS:   $ramp_steps"
+    echo ""
+  fi
 }
 
 # ---------------------------------------------------------------------------
-# 7) Actionable recommendations
+# 7) Actionable recommendations (resource + throttle aware)
 # ---------------------------------------------------------------------------
 section_recommendations() {
   [ ! -f "$PHASES_FILE" ] && return
 
   local recs=()
 
-  # Check for failures
   local fail_count
   fail_count=$(grep -c '"rc":[1-9]' "$PHASES_FILE" 2>/dev/null || true)
   fail_count="${fail_count:-0}"
+
+  # Gather context
+  local ramp_qps ramp_burst kb_timeout
+  ramp_qps=$(mode_val RAMP_QPS)
+  ramp_burst=$(mode_val RAMP_BURST)
+  kb_timeout=$(mode_val KB_TIMEOUT)
+
+  local alloc_pods_raw running_pods_raw alloc_cpu_raw req_cpu_raw
+  alloc_pods_raw=$(grep -i 'Allocatable Pods' "$FINGERPRINT_FILE" 2>/dev/null | head -1 | grep -o '[0-9]*' | head -1 || true)
+  running_pods_raw=$(grep -i 'Running Pods' "$FINGERPRINT_FILE" 2>/dev/null | head -1 | grep -o '[0-9]*' | head -1 || true)
+  alloc_cpu_raw=$(grep -i 'Allocatable CPU' "$FINGERPRINT_FILE" 2>/dev/null | head -1 | grep -o '[0-9]*' | head -1 || true)
+  req_cpu_raw=$(grep -i 'Requested CPU' "$FINGERPRINT_FILE" 2>/dev/null | head -1 | grep -o '[0-9]*' | head -1 || true)
 
   if [ "$fail_count" -gt 0 ]; then
     local probe_fails ramp_fails
@@ -429,13 +537,43 @@ section_recommendations() {
       recs+=("Probe pods failed — verify images are available (run: kubectl get events -n kb-probe)")
       recs+=("Try increasing KB_TIMEOUT if image pulls are slow in your environment")
     fi
+
     if [ "$ramp_fails" -gt 0 ]; then
-      recs+=("Ramp step failed — reduce stress intensity or check cluster capacity")
-      recs+=("Try fewer RAMP_STEPS or lower replica counts for the next run")
+      # Smart recommendation based on resource vs throttle
+      local has_headroom=false
+      if [ -n "$alloc_pods_raw" ] && [ -n "$running_pods_raw" ] && [ "$alloc_pods_raw" -gt 0 ] 2>/dev/null; then
+        local pod_pct=$(( running_pods_raw * 100 / alloc_pods_raw ))
+        if [ "$pod_pct" -lt 80 ]; then
+          has_headroom=true
+        fi
+      fi
+      if [ -n "$alloc_cpu_raw" ] && [ -n "$req_cpu_raw" ] && [ "$alloc_cpu_raw" -gt 0 ] 2>/dev/null; then
+        local cpu_pct=$(( req_cpu_raw * 100 / alloc_cpu_raw ))
+        if [ "$cpu_pct" -lt 80 ]; then
+          has_headroom=true
+        fi
+      fi
+
+      local low_qps=false
+      if [ -n "$ramp_qps" ] && [ "$ramp_qps" -le 50 ] 2>/dev/null; then
+        low_qps=true
+      fi
+
+      if [ "$has_headroom" = "true" ] && [ "$low_qps" = "true" ]; then
+        recs+=("Cluster still has resource headroom — the timeout is likely caused by kube-burner API throttling")
+        recs+=("Increase RAMP_QPS (currently ${ramp_qps}) and RAMP_BURST (currently ${ramp_burst:-default}) in config.yaml")
+        recs+=("Also consider raising KB_TIMEOUT (currently ${kb_timeout:-5m}) to give later steps more time")
+      elif [ "$has_headroom" = "true" ]; then
+        recs+=("Cluster has resource headroom — consider raising KB_TIMEOUT (currently ${kb_timeout:-5m})")
+        [ -n "$ramp_qps" ] && recs+=("Current RAMP_QPS=${ramp_qps}; raise it if phase durations are climbing linearly")
+      else
+        recs+=("Cluster may be near capacity — reduce stress intensity or add nodes before re-running")
+        recs+=("Try fewer RAMP_STEPS or lower replica counts for the next run")
+      fi
     fi
   fi
 
-  # Check latency degradation
+  # Latency degradation
   if [ -s "$PROBE_FILE" ]; then
     local baseline_stats recovery_stats
     baseline_stats=$(compute_latency_stats "baseline" 2>/dev/null) || true
@@ -446,7 +584,7 @@ section_recommendations() {
       b_p50=$(echo "$baseline_stats" | awk '{print $3}')
       r_p50=$(echo "$recovery_stats" | awk '{print $3}')
 
-      if [ "$b_p50" -gt 0 ]; then
+      if [ "$b_p50" -gt 0 ] 2>/dev/null; then
         local ratio_x10=$(( r_p50 * 10 / b_p50 ))
         if [ "$ratio_x10" -gt 20 ]; then
           recs+=("Recovery latency is still >2x baseline — consider longer RECOVERY_PROBE_DURATION to track stabilization")
@@ -456,12 +594,17 @@ section_recommendations() {
     fi
   fi
 
-  # Check if only 1 ramp step was used
+  # Only 1 ramp step
   local ramp_count
   ramp_count=$(grep -c '"phase":"ramp-step' "$PHASES_FILE" 2>/dev/null || true)
   ramp_count="${ramp_count:-0}"
   if [ "$ramp_count" -le 1 ] && [ "$fail_count" = "0" ]; then
     recs+=("Only $ramp_count ramp step ran — increase RAMP_STEPS to find the degradation threshold")
+  fi
+
+  # QPS sanity check even if no failures
+  if [ -n "$ramp_qps" ] && [ "$ramp_qps" -le 20 ] 2>/dev/null && [ "$fail_count" = "0" ]; then
+    recs+=("RAMP_QPS=$ramp_qps is conservative — raise it (e.g. 100-200) to make later ramp steps complete faster")
   fi
 
   [ ${#recs[@]} -eq 0 ] && return
